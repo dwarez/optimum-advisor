@@ -11,6 +11,7 @@ use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{write_trial_result, ResultSet, TrialResult};
 use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::serve::EngineArg;
+use crate::terminal;
 use crate::Result;
 
 pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()> {
@@ -135,43 +136,56 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
     ensure_hf_token()?;
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
+    terminal::info(
+        out,
+        "sweep",
+        format!("{total} trial(s), optimizing {}", setup.metric),
+    )?;
 
     for (index, config) in configs.into_iter().enumerate() {
-        writeln!(
+        terminal::info(
             out,
-            "trial: {}/{} candidate: {}",
-            index + 1,
-            total,
-            describe_config(adapter, &config)
-        )
-        .map_err(write_error)?;
+            "trial",
+            format!(
+                "{}/{} remaining={} {}",
+                index + 1,
+                total,
+                total.saturating_sub(index + 1),
+                describe_config(adapter, &config)
+            ),
+        )?;
         validate_serving_args(setup, &config)?;
         let plan = adapter.run_plan(&config);
         let output = execute_run_plan(&plan, &mut *out)?;
         let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
         let files = write_trial_result(&setup.results_dir, &result)?;
-        writeln!(out, "result_raw: {}", files.raw.display()).map_err(write_error)?;
-        writeln!(out, "result_summary: {}", files.summary.display()).map_err(write_error)?;
+        terminal::ok(out, "metrics", metrics_line(&result))?;
+        terminal::info(
+            out,
+            "saved",
+            format!(
+                "summary={}, raw={}",
+                files.summary.display(),
+                files.raw.display()
+            ),
+        )?;
         results.push(result);
     }
 
     results.sort_best_first();
     let best = results.best().ok_or("no benchmark results produced")?;
-    writeln!(
+    terminal::ok(
         out,
-        "winning_metric: {}={}",
-        setup.metric,
-        best.winning_value()
-            .map(|value| format!("{value:.4}"))
-            .unwrap_or_else(|| "unavailable".to_string())
-    )
-    .map_err(write_error)?;
-    writeln!(
-        out,
-        "best_candidate: {}",
-        describe_config(adapter, &best.config)
-    )
-    .map_err(write_error)?;
+        "best",
+        format!(
+            "{}={} {}",
+            setup.metric,
+            best.winning_value()
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "unavailable".to_string()),
+            describe_config(adapter, &best.config)
+        ),
+    )?;
     Ok(())
 }
 
@@ -201,7 +215,7 @@ fn print_run_plans(
         if configs.len() > 1 {
             writeln!(
                 out,
-                "trial: {}/{} candidate: {}",
+                "trial: {}/{} config: {}",
                 index + 1,
                 configs.len(),
                 describe_config(adapter, config)
@@ -215,12 +229,22 @@ fn print_run_plans(
 }
 
 fn describe_config(adapter: &dyn EngineAdapter, config: &ServingConfig) -> String {
-    let mut description = adapter.describe_candidate(&config.candidate);
-    if !config.serve_args.is_empty() {
-        description.push_str(", serve_args=");
-        description.push_str(&describe_engine_args(&config.serve_args));
-    }
-    description
+    format!(
+        "server_args={}",
+        describe_engine_args(&display_server_args(adapter, config))
+    )
+}
+
+fn display_server_args(adapter: &dyn EngineAdapter, config: &ServingConfig) -> Vec<EngineArg> {
+    adapter
+        .serving_args(config)
+        .into_iter()
+        .filter(|arg| !is_identity_server_arg(&arg.name))
+        .collect()
+}
+
+fn is_identity_server_arg(name: &str) -> bool {
+    matches!(name, "--model" | "--model-path" | "--host" | "--port")
 }
 
 fn describe_engine_args(args: &[EngineArg]) -> String {
@@ -231,6 +255,33 @@ fn describe_engine_args(args: &[EngineArg]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn metrics_line(result: &TrialResult) -> String {
+    let mut parts = Vec::new();
+    if let Some(value) = result.winning_value() {
+        parts.push(format!("{}={value:.4}", result.winning_metric));
+    }
+    for (label, value) in [
+        ("tps", result.metrics.output_token_throughput),
+        ("ttft_ms", result.metrics.mean_ttft_ms),
+        ("itl_ms", result.metrics.mean_itl_ms),
+        ("req_s", result.metrics.request_throughput),
+        ("failed", result.metrics.failed_requests),
+    ] {
+        let Some(value) = value else {
+            continue;
+        };
+        let item = format!("{label}={value:.4}");
+        if !parts.contains(&item) {
+            parts.push(item);
+        }
+    }
+    if parts.is_empty() {
+        "unavailable".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn advise(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
@@ -362,5 +413,28 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("inspect: docker run"));
         assert!(text.contains("--entrypoint python3"));
+    }
+
+    #[test]
+    fn config_description_uses_effective_server_args() {
+        let mut setup = crate::cli::Setup::default_for_mode(Mode::Run);
+        setup.model = "m".to_string();
+        setup.gpus = 2;
+        setup
+            .serve_args
+            .push(EngineArg::value("tensor-parallel-size", "2"));
+        setup
+            .serve_args
+            .push(EngineArg::value("gpu-memory-utilization", "0.80"));
+        let adapter = adapter_for(setup.engine);
+        let candidate = adapter.initial_candidate(&setup);
+        let config = ServingConfig::from_setup_and_candidate(&setup, candidate);
+
+        let description = describe_config(adapter, &config);
+
+        assert!(description.contains("--tensor-parallel-size=2"));
+        assert!(description.contains("--gpu-memory-utilization=0.80"));
+        assert!(!description.contains("tp=1"));
+        assert!(!description.contains("gpu_memory_utilization=0.90"));
     }
 }

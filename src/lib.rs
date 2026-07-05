@@ -4,6 +4,7 @@ pub mod domain;
 pub mod engines;
 pub mod results;
 pub mod runtime;
+pub mod terminal;
 
 pub use domain::{config, engine, logs, trial};
 pub use engines::{params, serve};
