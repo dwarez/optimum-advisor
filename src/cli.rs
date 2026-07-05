@@ -110,6 +110,18 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
                     "--benchmark-max-concurrency",
                 )?);
             }
+            "--random-input-len" => {
+                setup.benchmark.random_input_len = parse_value(
+                    &take_value(&mut args, "--random-input-len")?,
+                    "--random-input-len",
+                )?;
+            }
+            "--random-output-len" => {
+                setup.benchmark.random_output_len = parse_value(
+                    &take_value(&mut args, "--random-output-len")?,
+                    "--random-output-len",
+                )?;
+            }
             "--tp" => {
                 setup.candidate.parallelism.tensor =
                     parse_value(&take_value(&mut args, "--tp")?, "--tp")?;
@@ -200,7 +212,7 @@ fn usage() -> String {
   optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric ttft|tps|itl]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
-  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--num-prompts N] [--request-rate R] --execute
+  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--num-prompts N] [--request-rate R] --execute
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
 }

@@ -1,7 +1,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 
 use crate::cli::parse_args;
 use crate::config::ServingConfig;
@@ -9,7 +8,7 @@ use crate::engine::Mode;
 use crate::engines::adapter_for;
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
-use crate::runner::execute_run_plan;
+use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::Result;
 
 pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()> {
@@ -58,7 +57,7 @@ fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     .map_err(write_error)?;
     writeln!(
         out,
-        "benchmark: dataset={}, num_prompts={}, request_rate={}, max_concurrency={}",
+        "benchmark: dataset={}, num_prompts={}, request_rate={}, max_concurrency={}, random_input_len={}, random_output_len={}",
         config.benchmark.dataset_name,
         config.benchmark.num_prompts,
         config.benchmark.request_rate,
@@ -66,7 +65,9 @@ fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             .benchmark
             .max_concurrency
             .map(|value| value.to_string())
-            .unwrap_or_else(|| "unbounded".to_string())
+            .unwrap_or_else(|| "unbounded".to_string()),
+        config.benchmark.random_input_len,
+        config.benchmark.random_output_len
     )
     .map_err(write_error)?;
     writeln!(out, "serve: {}", plan.server.shell()).map_err(write_error)?;
@@ -108,23 +109,15 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
     let config = ServingConfig::from_setup_and_candidate(setup, candidate);
-    let command = adapter.run_plan(&config).server;
+    let plan = adapter.run_plan(&config);
     if !setup.execute {
-        writeln!(out, "{}", command.shell()).map_err(write_error)?;
+        writeln!(out, "{}", plan.server.shell()).map_err(write_error)?;
         return Ok(());
     }
 
     ensure_hf_token()?;
     validate_serving_args(setup, &config)?;
-    let status = Command::new(&command.program)
-        .args(&command.args)
-        .status()
-        .map_err(|err| format!("failed to start docker: {err}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("docker exited with status {status}"))
-    }
+    execute_server_plan(&plan, out)
 }
 
 fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {

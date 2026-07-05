@@ -76,12 +76,25 @@ fn params_dry_run_prints_container_inspection_command() {
 
 #[test]
 fn run_dry_run_prints_server_and_benchmark_commands() {
-    let output = run(&["run", "--engine", "sglang", "--model", "m"]);
+    let output = run(&[
+        "run",
+        "--engine",
+        "sglang",
+        "--model",
+        "m",
+        "--num-prompts",
+        "4",
+        "--random-output-len",
+        "32",
+    ]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("server: docker run"));
-    assert!(text.contains("benchmark: python3 -m sglang.bench_serving"));
+    assert!(text.contains("benchmark: docker run"));
+    assert!(text.contains("sglang.bench_serving"));
+    assert!(text.contains("--num-prompts 4"));
+    assert!(text.contains("--random-output-len 32"));
 }
 
 #[test]

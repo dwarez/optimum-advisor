@@ -6,6 +6,9 @@ use std::time::{Duration, Instant};
 
 use crate::Result;
 
+pub const OWNED_CONTAINER_LABEL: &str = "optimum-advisor=true";
+pub const SERVER_CONTAINER_LABEL: &str = "optimum-advisor.role=server";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcessSpec {
     pub program: String,
@@ -33,6 +36,7 @@ pub struct RunPlan {
     pub server: ProcessSpec,
     pub benchmark: ProcessSpec,
     pub readiness: Readiness,
+    pub server_container: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +48,7 @@ pub struct Readiness {
 }
 
 pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
+    ensure_port_free(&plan.readiness)?;
     writeln!(out, "starting: {}", plan.server.shell()).map_err(write_error)?;
     let mut server = Command::new(&plan.server.program)
         .args(&plan.server.args)
@@ -66,18 +71,32 @@ pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
         }
     })();
 
-    let _ = server.kill();
-    let _ = server.wait();
+    stop_server(&mut server, plan.server_container.as_deref());
+    result
+}
+
+pub fn execute_server_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
+    ensure_port_free(&plan.readiness)?;
+    writeln!(out, "starting: {}", plan.server.shell()).map_err(write_error)?;
+    let mut server = Command::new(&plan.server.program)
+        .args(&plan.server.args)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|err| format!("failed to start server: {err}"))?;
+
+    let result = match server.wait() {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!("server exited with status {status}")),
+        Err(err) => Err(format!("failed to wait for server: {err}")),
+    };
+    cleanup_server_container(plan.server_container.as_deref());
     result
 }
 
 fn wait_for_readiness(readiness: &Readiness, server: &mut std::process::Child) -> Result<()> {
     let deadline = Instant::now() + readiness.timeout;
-    let addr = (readiness.host.as_str(), readiness.port)
-        .to_socket_addrs()
-        .map_err(|err| format!("invalid readiness address: {err}"))?
-        .next()
-        .ok_or("readiness address resolved to nothing")?;
+    let addr = readiness_addr(readiness)?;
 
     loop {
         let ready = if let Some(path) = &readiness.http_path {
@@ -104,6 +123,49 @@ fn wait_for_readiness(readiness: &Readiness, server: &mut std::process::Child) -
         }
         sleep(Duration::from_millis(500));
     }
+}
+
+fn ensure_port_free(readiness: &Readiness) -> Result<()> {
+    let addr = readiness_addr(readiness)?;
+    if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+        Err(format!(
+            "port {}:{} is already in use; stop the existing server/container or choose a different --port",
+            readiness.host, readiness.port
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn stop_server(server: &mut std::process::Child, container: Option<&str>) {
+    let _ = server.kill();
+    cleanup_server_container(container);
+    let _ = server.wait();
+    cleanup_server_container(container);
+}
+
+fn cleanup_server_container(container: Option<&str>) {
+    if let Some(container) = container {
+        let _ = cleanup_container(container);
+    }
+}
+
+fn cleanup_container(container: &str) -> bool {
+    Command::new("docker")
+        .args(["rm", "-f", container])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn readiness_addr(readiness: &Readiness) -> Result<std::net::SocketAddr> {
+    (readiness.host.as_str(), readiness.port)
+        .to_socket_addrs()
+        .map_err(|err| format!("invalid readiness address: {err}"))?
+        .next()
+        .ok_or("readiness address resolved to nothing".to_string())
 }
 
 fn http_ready(addr: &std::net::SocketAddr, host: &str, path: &str) -> bool {
@@ -146,9 +208,27 @@ fn write_error(err: std::io::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     #[test]
     fn quotes_shell_arguments() {
         assert_eq!(shell_join(&["a b".to_string()]), "'a b'");
+    }
+
+    #[test]
+    fn detects_occupied_readiness_port() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind test listener: {err}"),
+        };
+        let readiness = Readiness {
+            host: "127.0.0.1".to_string(),
+            port: listener.local_addr().unwrap().port(),
+            timeout: Duration::from_secs(1),
+            http_path: None,
+        };
+
+        assert!(ensure_port_free(&readiness).is_err());
     }
 }
