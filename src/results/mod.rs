@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::ServingConfig;
-use crate::engine::Metric;
+use crate::engine::{Engine, Metric};
 use crate::serve::EngineArg;
 use crate::Result;
 
@@ -132,6 +132,18 @@ pub struct ResultFiles {
     pub summary: PathBuf,
 }
 
+pub fn create_run_dir(root: impl AsRef<Path>, engine: Engine) -> Result<PathBuf> {
+    let root = root.as_ref();
+    let dir = root.join(format!(
+        "run-{}-{}-{}",
+        now_nanos()?,
+        engine,
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    Ok(dir)
+}
+
 pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result<ResultFiles> {
     let dir = dir.as_ref();
     fs::create_dir_all(dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
@@ -151,6 +163,12 @@ pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result
         .map_err(|err| format!("failed to write {}: {err}", summary.display()))?;
 
     Ok(ResultFiles { raw, summary })
+}
+
+pub fn write_best_config(dir: impl AsRef<Path>, text: &str) -> Result<PathBuf> {
+    let path = dir.as_ref().join("best.conf");
+    fs::write(&path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    Ok(path)
 }
 
 fn compare_results(left: &TrialResult, right: &TrialResult, metric: Metric) -> Ordering {
@@ -334,5 +352,21 @@ Mean ITL (ms):                           33.61",
         let summary = fs::read_to_string(files.summary).unwrap();
         assert!(summary.contains("winning_metric"));
         assert!(summary.contains("27.5400"));
+    }
+
+    #[test]
+    fn creates_run_dir_and_best_config() {
+        let root = std::env::temp_dir().join(format!(
+            "optimum-advisor-run-dir-test-{}",
+            std::process::id()
+        ));
+
+        let dir = create_run_dir(&root, Engine::Vllm).unwrap();
+        let best = write_best_config(&dir, "engine = vllm\n").unwrap();
+
+        assert!(dir.starts_with(&root));
+        assert!(dir.file_name().unwrap().to_string_lossy().contains("vllm"));
+        assert_eq!(best.file_name().unwrap(), "best.conf");
+        assert_eq!(fs::read_to_string(best).unwrap(), "engine = vllm\n");
     }
 }

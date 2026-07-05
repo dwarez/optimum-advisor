@@ -36,8 +36,8 @@ For now it contains:
   the introspected schema when executing
 - benchmark settings: dataset name, number of prompts, request rate, and max
   concurrency, plus random input/output lengths for synthetic benchmark data
-- result settings: winning metric from `--metric` and result files under
-  `.optimum-advisor/results` unless `--results-dir` is set
+- result settings: winning metric from `--metric`; each execution writes a
+  subdirectory under `.optimum-advisor/results` unless `--results-dir` is set
 - engine-specific serving args and sweeps from `[serve]` and `[sweep]` sections
   in a config file
 
@@ -70,7 +70,8 @@ inside the same SGLang image.
   image.
 - SGLang benchmark invocation through `python3 -m sglang.bench_serving`
   inside the selected SGLang image.
-- Benchmark result capture with raw output and a one-row TSV summary on disk.
+- Benchmark result capture with raw output, one-row TSV summaries, and
+  `best.conf` for the winning config in each result subdirectory.
 - Initial log classification for OOM and KV-cache pressure.
 - A small sync helper for sending the repo to the GPU machine:
   `scripts/sync-to-gpu.sh`.
