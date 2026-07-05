@@ -11,26 +11,82 @@ better configurations.
 
 For now the focus is on vLLM and SGLang.
 
+## Configuration
+
+A configuration is the complete executable setup for one serving attempt. It is
+not just the serving engine flags.
+
+For now it contains:
+
+- engine name, such as `vllm` or `sglang`
+- container image
+- model id or model path
+- GPU count
+- `HF_TOKEN` from the environment for execution; the token is forwarded into
+  serving and benchmark containers without printing its value
+- max model length, defaulting to `8192` for now so long-context models do not
+  force huge KV-cache allocation during smoke runs
+- host, port, and startup timeout
+- optimization metric, such as `ttft`, `tps`, or `itl`
+- abstract candidate knobs: tensor/pipeline/data parallelism, memory fraction,
+  prefill token budget, and max running requests
+- extra engine-specific serving args from `--serve-arg` and `--serve-flag`
+- direct engine-specific flags, such as `--kv-cache-dtype fp8`; unknown
+  `--long-flags` are forwarded to the selected engine and validated against
+  the introspected schema when executing
+- benchmark settings: dataset name, number of prompts, request rate, and max
+  concurrency
+
+The engine adapter turns that configuration into concrete commands. For example,
+vLLM maps the abstract candidate to `--tensor-parallel-size`,
+`--gpu-memory-utilization`, `--max-model-len`, and
+`--max-num-batched-tokens`, then runs `vllm bench serve` from inside the same
+vLLM image.
+
 ## What Exists
 
 - Rust CLI backbone with `plan`, `params`, `serve`, `run`, and `advise` modes.
-- Engine-specific adapters for vLLM and SGLang.
+- First-class executable serving configuration in code.
+- Engine-specific adapter folders for vLLM and SGLang under `src/engines/`.
 - Abstract candidate configuration for parallelism, memory budget, and scheduler
   budget, rendered into engine-specific serving flags.
 - Runtime parameter introspection from the selected container image.
 - Cached parameter schemas under `.optimum-advisor/params`.
 - Basic validation for extra serving args against the introspected schema.
 - Docker command construction for serving containers, including GPU passthrough.
+- vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
+  image.
 - Initial log classification for OOM and KV-cache pressure.
 - A small sync helper for sending the repo to the GPU machine:
   `scripts/sync-to-gpu.sh`.
 - Unit and smoke tests for the current atomic behavior.
 
+## Quick Checks
+
+Local checks that do not need a GPU:
+
+```bash
+cargo test
+cargo run -- plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
+cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
+cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8
+```
+
+The last command is a dry run unless `--execute` is passed. It should print a
+server Docker command and a benchmark Docker command.
+
+GPU smoke run:
+
+```bash
+export HF_TOKEN=hf_...
+cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
+cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --execute
+```
+
 ## Missing / TODO
 
 - Make SGLang parameter introspection as robust as vLLM's argparse-based path.
-- Run benchmarks inside containers or a controlled environment instead of
-  assuming benchmark CLIs exist on the host.
+- Move SGLang benchmark invocation into its selected engine image.
 - Capture structured benchmark metrics such as TTFT, ITL, TPS, throughput, and
   error rates.
 - Persist trials, outcomes, configs, and metrics in a real run history.
@@ -43,4 +99,3 @@ For now the focus is on vLLM and SGLang.
 - Add safer Docker lifecycle handling, cleanup, logs, names, volumes, and port
   management.
 - Expand integration tests on an actual CUDA host.
-

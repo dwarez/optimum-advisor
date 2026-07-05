@@ -3,9 +3,10 @@ use crate::config::ServingConfig;
 use crate::engine::{Engine, Metric};
 use crate::logs::Outcome;
 use crate::runner::{ProcessSpec, RunPlan};
+use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
-use super::{append_extra_args, docker_server_args, http_readiness, EngineAdapter};
+use super::{append_engine_args, docker_server_args, http_readiness, EngineAdapter};
 
 const VLLM_ARGPARSE_INTROSPECTION: &str = r#"
 import argparse
@@ -101,21 +102,30 @@ impl EngineAdapter for VllmAdapter {
         )
     }
 
+    fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg> {
+        let mut args = vec![
+            EngineArg::value("--model", config.model.clone()),
+            EngineArg::value(
+                "--tensor-parallel-size",
+                config.candidate.parallelism.tensor.to_string(),
+            ),
+            EngineArg::value(
+                "--gpu-memory-utilization",
+                format!("{:.2}", config.candidate.memory.fraction),
+            ),
+            EngineArg::value("--max-model-len", config.max_model_len.to_string()),
+            EngineArg::value(
+                "--max-num-batched-tokens",
+                config.candidate.scheduler.prefill_token_budget.to_string(),
+            ),
+        ];
+        args.extend(config.serve_args.clone());
+        args
+    }
+
     fn run_plan(&self, config: &ServingConfig) -> RunPlan {
         let mut server_args = docker_server_args(config, "8000");
-        server_args.extend([
-            "--model".to_string(),
-            config.model.clone(),
-            "--tensor-parallel-size".to_string(),
-            config.candidate.parallelism.tensor.to_string(),
-            "--gpu-memory-utilization".to_string(),
-            format!("{:.2}", config.candidate.memory.fraction),
-            "--max-model-len".to_string(),
-            config.max_model_len.to_string(),
-            "--max-num-batched-tokens".to_string(),
-            config.candidate.scheduler.prefill_token_budget.to_string(),
-        ]);
-        append_extra_args(config, &mut server_args);
+        append_engine_args(&mut server_args, self.serving_args(config));
 
         RunPlan {
             server: ProcessSpec::new("docker", server_args),

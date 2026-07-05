@@ -26,7 +26,8 @@ pub struct Setup {
     pub benchmark: BenchmarkConfig,
 }
 
-pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
+pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
+    let mut args = args.peekable();
     let mode = match args.next().as_deref() {
         Some("plan") => Mode::Plan,
         Some("params") => Mode::Params,
@@ -162,6 +163,13 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
                 )?;
             }
             "-h" | "--help" => return Err(usage()),
+            unknown if unknown.starts_with("--") => {
+                if let Some(value) = args.next_if(|value| !value.starts_with("--")) {
+                    setup.serve_args.push(EngineArg::value(unknown, value));
+                } else {
+                    setup.serve_args.push(EngineArg::flag(unknown));
+                }
+            }
             _ => return Err(format!("unknown argument: {arg}")),
         }
     }
@@ -191,7 +199,7 @@ fn usage() -> String {
     "usage:
   optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric ttft|tps|itl]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
-  optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--execute]
+  optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
   optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--num-prompts N] [--request-rate R] --execute
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
@@ -239,6 +247,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(setup.serve_args.len(), 2);
+    }
+
+    #[test]
+    fn unknown_long_flags_become_engine_args() {
+        let setup = parse_args(
+            [
+                "plan",
+                "--engine",
+                "vllm",
+                "--model",
+                "m",
+                "--kv-cache-dtype",
+                "fp8",
+                "--disable-log-stats",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(setup.serve_args[0].name, "--kv-cache-dtype");
+        assert_eq!(setup.serve_args[0].value.as_deref(), Some("fp8"));
+        assert_eq!(setup.serve_args[1].name, "--disable-log-stats");
+        assert_eq!(setup.serve_args[1].value, None);
     }
 
     #[test]

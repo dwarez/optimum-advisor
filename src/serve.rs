@@ -7,14 +7,19 @@ pub struct EngineArg {
 }
 
 impl EngineArg {
+    pub fn value(name: impl Into<String>, value: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            name: normalize_arg_name(&name),
+            value: Some(value.into()),
+        }
+    }
+
     pub fn assignment(value: &str) -> Result<Self> {
         let (name, arg_value) = value
             .split_once('=')
             .ok_or_else(|| format!("--serve-arg expects NAME=VALUE, got {value}"))?;
-        Ok(Self {
-            name: normalize_arg_name(name),
-            value: Some(arg_value.to_string()),
-        })
+        Ok(Self::value(name, arg_value))
     }
 
     pub fn flag(value: &str) -> Self {
