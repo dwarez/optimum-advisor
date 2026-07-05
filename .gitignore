@@ -1,0 +1,23 @@
+# Rust build output
+/target/
+**/*.rs.bk
+
+# Local runtime/cache state
+/.optimum-advisor/
+/.tokensave/
+
+# Local environment and logs
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.log
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# For my personal dev
+scripts/sync-to-gpu.sh
