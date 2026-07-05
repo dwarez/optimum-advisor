@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
@@ -40,6 +40,7 @@ pub struct Readiness {
     pub host: String,
     pub port: u16,
     pub timeout: Duration,
+    pub http_path: Option<String>,
 }
 
 pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
@@ -79,7 +80,12 @@ fn wait_for_readiness(readiness: &Readiness, server: &mut std::process::Child) -
         .ok_or("readiness address resolved to nothing")?;
 
     loop {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok() {
+        let ready = if let Some(path) = &readiness.http_path {
+            http_ready(&addr, &readiness.host, path)
+        } else {
+            TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
+        };
+        if ready {
             return Ok(());
         }
         if let Some(status) = server
@@ -97,6 +103,23 @@ fn wait_for_readiness(readiness: &Readiness, server: &mut std::process::Child) -
             ));
         }
         sleep(Duration::from_millis(500));
+    }
+}
+
+fn http_ready(addr: &std::net::SocketAddr, host: &str, path: &str) -> bool {
+    let Ok(mut stream) = TcpStream::connect_timeout(addr, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = [0; 32];
+    match stream.read(&mut response) {
+        Ok(n) => String::from_utf8_lossy(&response[..n]).starts_with("HTTP/1.1 200"),
+        Err(_) => false,
     }
 }
 

@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::cli::parse_args;
+use crate::config::ServingConfig;
 use crate::engine::Mode;
 use crate::engines::adapter_for;
 use crate::logs::classify_log;
@@ -39,11 +40,32 @@ fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         };
         schema.validate_args(&setup.serve_args)?;
     }
-    let plan = adapter.run_plan(setup, &candidate);
-    writeln!(out, "engine: {}", setup.engine).map_err(write_error)?;
-    writeln!(out, "model: {}", setup.model).map_err(write_error)?;
-    writeln!(out, "metric: {}", setup.metric).map_err(write_error)?;
-    writeln!(out, "candidate: {}", adapter.describe_candidate(&candidate)).map_err(write_error)?;
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    let plan = adapter.run_plan(&config);
+    writeln!(out, "engine: {}", config.engine).map_err(write_error)?;
+    writeln!(out, "image: {}", config.image).map_err(write_error)?;
+    writeln!(out, "model: {}", config.model).map_err(write_error)?;
+    writeln!(out, "max_model_len: {}", config.max_model_len).map_err(write_error)?;
+    writeln!(out, "metric: {}", config.metric).map_err(write_error)?;
+    writeln!(
+        out,
+        "candidate: {}",
+        adapter.describe_candidate(&config.candidate)
+    )
+    .map_err(write_error)?;
+    writeln!(
+        out,
+        "benchmark: dataset={}, num_prompts={}, request_rate={}, max_concurrency={}",
+        config.benchmark.dataset_name,
+        config.benchmark.num_prompts,
+        config.benchmark.request_rate,
+        config
+            .benchmark
+            .max_concurrency
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "unbounded".to_string())
+    )
+    .map_err(write_error)?;
     writeln!(out, "serve: {}", plan.server.shell()).map_err(write_error)?;
     writeln!(out, "bench: {}", plan.benchmark.shell()).map_err(write_error)?;
     Ok(())
@@ -82,12 +104,14 @@ fn print_params(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
-    let command = adapter.run_plan(setup, &candidate).server;
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    let command = adapter.run_plan(&config).server;
     if !setup.execute {
         writeln!(out, "{}", command.shell()).map_err(write_error)?;
         return Ok(());
     }
 
+    ensure_hf_token()?;
     let status = Command::new(&command.program)
         .args(&command.args)
         .status()
@@ -102,12 +126,14 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
-    let plan = adapter.run_plan(setup, &candidate);
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    let plan = adapter.run_plan(&config);
     if !setup.execute {
         writeln!(out, "server: {}", plan.server.shell()).map_err(write_error)?;
         writeln!(out, "benchmark: {}", plan.benchmark.shell()).map_err(write_error)?;
         return Ok(());
     }
+    ensure_hf_token()?;
     execute_run_plan(&plan, out)
 }
 
@@ -121,9 +147,15 @@ fn advise(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let outcome = classify_log(&log);
     let current = adapter.initial_candidate(setup);
     let next = adapter.next_candidate(setup, &current, outcome);
-    let plan = adapter.run_plan(setup, &next);
+    let config = ServingConfig::from_setup_and_candidate(setup, next);
+    let plan = adapter.run_plan(&config);
     writeln!(out, "outcome: {:?}", outcome).map_err(write_error)?;
-    writeln!(out, "next candidate: {}", adapter.describe_candidate(&next)).map_err(write_error)?;
+    writeln!(
+        out,
+        "next candidate: {}",
+        adapter.describe_candidate(&config.candidate)
+    )
+    .map_err(write_error)?;
     writeln!(out, "serve: {}", plan.server.shell()).map_err(write_error)?;
     Ok(())
 }
@@ -137,6 +169,17 @@ fn image_for(setup: &crate::cli::Setup) -> String {
 
 fn write_error(err: std::io::Error) -> String {
     format!("failed to write output: {err}")
+}
+
+fn ensure_hf_token() -> Result<()> {
+    if std::env::var("HF_TOKEN")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err("HF_TOKEN is required for executing serving/benchmark containers".to_string())
+    }
 }
 
 #[cfg(test)]
@@ -162,7 +205,8 @@ mod tests {
 
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("serve: docker run"));
-        assert!(text.contains("bench: vllm bench serve"));
+        assert!(text.contains("bench: docker run"));
+        assert!(text.contains("--entrypoint vllm"));
     }
 
     #[test]

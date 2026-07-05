@@ -1,3 +1,4 @@
+use crate::config::BenchmarkConfig;
 use crate::engine::{Engine, Metric, Mode};
 use crate::serve::EngineArg;
 use crate::trial::Candidate;
@@ -13,6 +14,7 @@ pub struct Setup {
     pub host: String,
     pub port: u16,
     pub startup_timeout_secs: u64,
+    pub max_model_len: u32,
     pub param_cache_dir: String,
     pub refresh_params: bool,
     pub validate_params: bool,
@@ -21,6 +23,7 @@ pub struct Setup {
     pub log_file: Option<String>,
     pub candidate: Candidate,
     pub serve_args: Vec<EngineArg>,
+    pub benchmark: BenchmarkConfig,
 }
 
 pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
@@ -43,6 +46,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
         host: "127.0.0.1".to_string(),
         port: 8000,
         startup_timeout_secs: 300,
+        max_model_len: 8192,
         param_cache_dir: ".optimum-advisor/params".to_string(),
         refresh_params: false,
         validate_params: false,
@@ -51,6 +55,7 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
         log_file: None,
         candidate: Candidate::default(),
         serve_args: Vec::new(),
+        benchmark: BenchmarkConfig::default(),
     };
 
     while let Some(arg) = args.next() {
@@ -65,6 +70,12 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
                 setup.startup_timeout_secs = parse_value(
                     &take_value(&mut args, "--startup-timeout-secs")?,
                     "--startup-timeout-secs",
+                )?;
+            }
+            "--max-model-len" => {
+                setup.max_model_len = parse_value(
+                    &take_value(&mut args, "--max-model-len")?,
+                    "--max-model-len",
                 )?;
             }
             "--param-cache-dir" => {
@@ -82,6 +93,22 @@ pub fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Setup> {
             "--serve-flag" => setup
                 .serve_args
                 .push(EngineArg::flag(&take_value(&mut args, "--serve-flag")?)),
+            "--dataset-name" => {
+                setup.benchmark.dataset_name = take_value(&mut args, "--dataset-name")?
+            }
+            "--num-prompts" => {
+                setup.benchmark.num_prompts =
+                    parse_value(&take_value(&mut args, "--num-prompts")?, "--num-prompts")?;
+            }
+            "--request-rate" => {
+                setup.benchmark.request_rate = take_value(&mut args, "--request-rate")?
+            }
+            "--benchmark-max-concurrency" => {
+                setup.benchmark.max_concurrency = Some(parse_value(
+                    &take_value(&mut args, "--benchmark-max-concurrency")?,
+                    "--benchmark-max-concurrency",
+                )?);
+            }
             "--tp" => {
                 setup.candidate.parallelism.tensor =
                     parse_value(&take_value(&mut args, "--tp")?, "--tp")?;
@@ -162,10 +189,10 @@ fn parse_value<T: std::str::FromStr>(value: &str, flag: &str) -> Result<T> {
 
 fn usage() -> String {
     "usage:
-  optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--metric ttft|tps|itl]
+  optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric ttft|tps|itl]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--execute]
-  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] --execute
+  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--num-prompts N] [--request-rate R] --execute
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
 }
