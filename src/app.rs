@@ -319,8 +319,17 @@ fn metrics_line(result: &TrialResult) -> String {
     }
     for (label, value) in [
         ("tps", result.metrics.output_token_throughput),
+        ("total_tps", result.metrics.total_token_throughput),
+        ("input_tps", result.metrics.input_token_throughput),
+        ("peak_tps", result.metrics.peak_output_token_throughput),
         ("ttft_ms", result.metrics.mean_ttft_ms),
+        ("p99_ttft_ms", result.metrics.p99_ttft_ms),
+        ("tpot_ms", result.metrics.mean_tpot_ms),
+        ("p99_tpot_ms", result.metrics.p99_tpot_ms),
         ("itl_ms", result.metrics.mean_itl_ms),
+        ("p99_itl_ms", result.metrics.p99_itl_ms),
+        ("e2e_ms", result.metrics.mean_e2e_ms),
+        ("p99_e2e_ms", result.metrics.p99_e2e_ms),
         ("req_s", result.metrics.request_throughput),
         ("failed", result.metrics.failed_requests),
     ] {

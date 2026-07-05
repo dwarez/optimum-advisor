@@ -277,12 +277,12 @@ fn parse_value<T: std::str::FromStr>(value: &str, flag: &str) -> Result<T> {
 
 fn usage() -> String {
     "usage:
-  optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric ttft|tps|itl]
+  optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric tps|total_tps|req_s|ttft|p99_ttft|tpot|p99_tpot|itl|p99_itl|e2e|p99_e2e]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
   optimum-advisor sweep --config PATH [--dry-run]
   optimum-advisor bench --config PATH [--dry-run]
-  optimum-advisor bench --engine vllm|sglang --model MODEL [--gpus N] [--metric ttft|tps|itl] [--results-dir DIR] [--num-prompts N] [--request-rate R] [--dry-run]
+  optimum-advisor bench --engine vllm|sglang --model MODEL [--gpus N] [--metric tps|total_tps|req_s|ttft|p99_ttft|tpot|p99_tpot|itl|p99_itl|e2e|p99_e2e] [--results-dir DIR] [--num-prompts N] [--request-rate R] [--dry-run]
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
 }

@@ -42,8 +42,15 @@ impl EngineAdapter for SglangAdapter {
         let mut candidate = setup.candidate.clone();
         candidate.memory.fraction = 0.88;
         candidate.scheduler.prefill_token_budget = match setup.metric {
-            Metric::Itl => 2_048,
-            Metric::Ttft | Metric::Tps => 8_192,
+            Metric::Tpot
+            | Metric::P90Tpot
+            | Metric::P95Tpot
+            | Metric::P99Tpot
+            | Metric::Itl
+            | Metric::P90Itl
+            | Metric::P95Itl
+            | Metric::P99Itl => 2_048,
+            _ => 8_192,
         };
         candidate.clamp_to_gpus(setup.gpus);
         candidate

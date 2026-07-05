@@ -58,9 +58,16 @@ impl EngineAdapter for VllmAdapter {
     fn initial_candidate(&self, setup: &Setup) -> Candidate {
         let mut candidate = setup.candidate.clone();
         candidate.scheduler.prefill_token_budget = match setup.metric {
-            Metric::Ttft => 16_384,
-            Metric::Itl => 2_048,
-            Metric::Tps => 8_192,
+            Metric::Ttft | Metric::P90Ttft | Metric::P95Ttft | Metric::P99Ttft => 16_384,
+            Metric::Tpot
+            | Metric::P90Tpot
+            | Metric::P95Tpot
+            | Metric::P99Tpot
+            | Metric::Itl
+            | Metric::P90Itl
+            | Metric::P95Itl
+            | Metric::P99Itl => 2_048,
+            _ => 8_192,
         };
         candidate.clamp_to_gpus(setup.gpus);
         candidate

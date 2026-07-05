@@ -27,7 +27,8 @@ For now it contains:
 - max model length, defaulting to `8192` for now so long-context models do not
   force huge KV-cache allocation during smoke runs
 - host, port, and startup timeout
-- optimization metric, such as `ttft`, `tps`, or `itl`
+- optimization metric, such as `tps`, `total_tps`, `req_s`, `ttft`,
+  `p99_ttft`, `tpot`, `p99_tpot`, `itl`, `p99_itl`, `e2e`, or `p99_e2e`
 - abstract candidate knobs: tensor/pipeline/data parallelism, memory fraction,
   prefill token budget, and max running requests
 - extra engine-specific serving args from `--serve-arg` and `--serve-flag`
