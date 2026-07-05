@@ -11,6 +11,14 @@ fn run(args: &[&str]) -> Output {
         .expect("failed to run optimum-advisor")
 }
 
+fn run_without_hf_token(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_optimum-advisor"))
+        .args(args)
+        .env_remove("HF_TOKEN")
+        .output()
+        .expect("failed to run optimum-advisor")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
@@ -29,14 +37,28 @@ fn plan_renders_vllm_server_and_benchmark_commands() {
         "meta-llama/Llama-3.1-8B-Instruct",
         "--metric",
         "ttft",
+        "--max-model-len",
+        "8192",
+        "--num-prompts",
+        "4",
+        "--request-rate",
+        "2",
+        "--benchmark-max-concurrency",
+        "2",
     ]);
 
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(text.contains("serve: docker run"));
     assert!(text.contains("--tensor-parallel-size 1"));
+    assert!(text.contains("--max-model-len 8192"));
     assert!(text.contains("--max-num-batched-tokens 16384"));
-    assert!(text.contains("bench: vllm bench serve"));
+    assert!(text.contains("bench: docker run"));
+    assert!(text.contains("--entrypoint vllm"));
+    assert!(text.contains("bench serve"));
+    assert!(text.contains("--num-prompts 4"));
+    assert!(text.contains("--request-rate 2"));
+    assert!(text.contains("--max-concurrency 2"));
 }
 
 #[test]
@@ -60,6 +82,14 @@ fn run_dry_run_prints_server_and_benchmark_commands() {
     let text = stdout(&output);
     assert!(text.contains("server: docker run"));
     assert!(text.contains("benchmark: python3 -m sglang.bench_serving"));
+}
+
+#[test]
+fn run_execute_requires_hf_token() {
+    let output = run_without_hf_token(&["run", "--engine", "vllm", "--model", "m", "--execute"]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("HF_TOKEN is required"));
 }
 
 #[test]

@@ -17,6 +17,7 @@ pub fn classify_log(log: &str) -> Outcome {
     }
     if lower.contains("kv cache pool is full")
         || lower.contains("not enough kv cache")
+        || lower.contains("larger than the available kv cache memory")
         || lower.contains("preempted")
         || lower.contains("retract requests")
     {
@@ -48,6 +49,10 @@ mod tests {
     fn classifies_kv_pressure() {
         assert_eq!(
             classify_log("KV cache pool is full. Retract requests."),
+            Outcome::KvPressure
+        );
+        assert_eq!(
+            classify_log("which is larger than the available KV cache memory (3.66 GiB)"),
             Outcome::KvPressure
         );
     }
