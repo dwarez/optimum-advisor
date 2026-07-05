@@ -8,6 +8,7 @@ use crate::engine::Mode;
 use crate::engines::adapter_for;
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
+use crate::results::{write_trial_result, ResultSet, TrialResult};
 use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::Result;
 
@@ -132,7 +133,25 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
     }
     ensure_hf_token()?;
     validate_serving_args(setup, &config)?;
-    execute_run_plan(&plan, out)
+    let output = execute_run_plan(&plan, &mut *out)?;
+    let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
+    let mut results = ResultSet::new(setup.metric);
+    results.push(result);
+    results.sort_best_first();
+    let best = results.best().expect("just pushed one result");
+    let files = write_trial_result(&setup.results_dir, best)?;
+    writeln!(
+        out,
+        "winning_metric: {}={}",
+        setup.metric,
+        best.winning_value()
+            .map(|value| format!("{value:.4}"))
+            .unwrap_or_else(|| "unavailable".to_string())
+    )
+    .map_err(write_error)?;
+    writeln!(out, "result_raw: {}", files.raw.display()).map_err(write_error)?;
+    writeln!(out, "result_summary: {}", files.summary.display()).map_err(write_error)?;
+    Ok(())
 }
 
 fn advise(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {

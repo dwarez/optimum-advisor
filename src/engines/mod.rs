@@ -11,6 +11,9 @@ use crate::trial::Candidate;
 mod sglang;
 mod vllm;
 
+pub mod params;
+pub mod serve;
+
 pub trait EngineAdapter {
     fn engine(&self) -> Engine;
     fn help_command(&self, image: String) -> crate::runner::ProcessSpec;
@@ -101,6 +104,7 @@ mod tests {
             param_cache_dir: ".optimum-advisor/params".to_string(),
             refresh_params: false,
             validate_params: false,
+            results_dir: ".optimum-advisor/results".to_string(),
             metric: Metric::Tps,
             execute: false,
             log_file: None,

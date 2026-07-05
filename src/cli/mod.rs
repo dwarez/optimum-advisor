@@ -18,6 +18,7 @@ pub struct Setup {
     pub param_cache_dir: String,
     pub refresh_params: bool,
     pub validate_params: bool,
+    pub results_dir: String,
     pub metric: Metric,
     pub execute: bool,
     pub log_file: Option<String>,
@@ -51,6 +52,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
         param_cache_dir: ".optimum-advisor/params".to_string(),
         refresh_params: false,
         validate_params: false,
+        results_dir: ".optimum-advisor/results".to_string(),
         metric: Metric::Tps,
         execute: false,
         log_file: None,
@@ -84,6 +86,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
             }
             "--refresh-params" => setup.refresh_params = true,
             "--validate-params" => setup.validate_params = true,
+            "--results-dir" => setup.results_dir = take_value(&mut args, "--results-dir")?,
             "--metric" => setup.metric = Metric::parse(&take_value(&mut args, "--metric")?)?,
             "--execute" => setup.execute = true,
             "--log-file" => setup.log_file = Some(take_value(&mut args, "--log-file")?),
@@ -212,7 +215,7 @@ fn usage() -> String {
   optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric ttft|tps|itl]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
-  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--num-prompts N] [--request-rate R] --execute
+  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--metric ttft|tps|itl] [--results-dir DIR] [--num-prompts N] [--request-rate R] --execute
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
 }
@@ -294,5 +297,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(setup.engine, Engine::Sglang);
+    }
+
+    #[test]
+    fn accepts_results_dir() {
+        let setup = parse_args(
+            [
+                "run",
+                "--engine",
+                "vllm",
+                "--model",
+                "m",
+                "--results-dir",
+                "results",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert_eq!(setup.results_dir, "results");
     }
 }

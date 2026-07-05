@@ -36,6 +36,8 @@ For now it contains:
   the introspected schema when executing
 - benchmark settings: dataset name, number of prompts, request rate, and max
   concurrency, plus random input/output lengths for synthetic benchmark data
+- result settings: winning metric from `--metric` and result files under
+  `.optimum-advisor/results` unless `--results-dir` is set
 
 The engine adapter turns that configuration into concrete commands. For example,
 vLLM maps the abstract candidate to `--tensor-parallel-size`,
@@ -63,6 +65,7 @@ inside the same SGLang image.
   image.
 - SGLang benchmark invocation through `python3 -m sglang.bench_serving`
   inside the selected SGLang image.
+- Benchmark result capture with raw output and a one-row TSV summary on disk.
 - Initial log classification for OOM and KV-cache pressure.
 - A small sync helper for sending the repo to the GPU machine:
   `scripts/sync-to-gpu.sh`.
@@ -88,15 +91,15 @@ GPU smoke run:
 ```bash
 export HF_TOKEN=hf_...
 cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
-cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --execute
+cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --max-model-len 8192 --metric tps --results-dir .optimum-advisor/results --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --execute
 cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --execute
 ```
 
 ## Missing / TODO
 
 - Make SGLang parameter introspection as robust as vLLM's argparse-based path.
-- Capture structured benchmark metrics such as TTFT, ITL, TPS, throughput, and
-  error rates.
+- Expand structured benchmark metrics and engine-specific parsers beyond the
+  current common throughput/latency summary fields.
 - Persist trials, outcomes, configs, and metrics in a real run history.
 - Add a proper search loop over candidates instead of one-step advice.
 - Improve engine-specific heuristics for OOM, KV pressure, batching, tensor

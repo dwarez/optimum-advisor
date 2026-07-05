@@ -47,7 +47,13 @@ pub struct Readiness {
     pub http_path: Option<String>,
 }
 
-pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BenchmarkRunOutput {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<BenchmarkRunOutput> {
     ensure_port_free(&plan.readiness)?;
     writeln!(out, "starting: {}", plan.server.shell()).map_err(write_error)?;
     let mut server = Command::new(&plan.server.program)
@@ -60,14 +66,22 @@ pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<()> {
     let result = (|| {
         wait_for_readiness(&plan.readiness, &mut server)?;
         writeln!(out, "benchmark: {}", plan.benchmark.shell()).map_err(write_error)?;
-        let status = Command::new(&plan.benchmark.program)
+        let output = Command::new(&plan.benchmark.program)
             .args(&plan.benchmark.args)
-            .status()
+            .output()
             .map_err(|err| format!("failed to start benchmark: {err}"))?;
-        if status.success() {
-            Ok(())
+        out.write_all(&output.stdout).map_err(write_error)?;
+        std::io::stderr()
+            .write_all(&output.stderr)
+            .map_err(write_error)?;
+
+        if output.status.success() {
+            Ok(BenchmarkRunOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            })
         } else {
-            Err(format!("benchmark exited with status {status}"))
+            Err(format!("benchmark exited with status {}", output.status))
         }
     })();
 
