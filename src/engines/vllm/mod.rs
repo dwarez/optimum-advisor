@@ -7,7 +7,8 @@ use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
 use super::{
-    append_engine_args, docker_server_args, http_readiness, server_container_name, EngineAdapter,
+    append_engine_args, docker_server_args, http_readiness, push_default_arg,
+    server_container_name, EngineAdapter,
 };
 
 const VLLM_ARGPARSE_INTROSPECTION: &str = r#"
@@ -105,22 +106,32 @@ impl EngineAdapter for VllmAdapter {
     }
 
     fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg> {
-        let mut args = vec![
-            EngineArg::value("--model", config.model.clone()),
-            EngineArg::value(
-                "--tensor-parallel-size",
-                config.candidate.parallelism.tensor.to_string(),
-            ),
-            EngineArg::value(
-                "--gpu-memory-utilization",
-                format!("{:.2}", config.candidate.memory.fraction),
-            ),
-            EngineArg::value("--max-model-len", config.max_model_len.to_string()),
-            EngineArg::value(
-                "--max-num-batched-tokens",
-                config.candidate.scheduler.prefill_token_budget.to_string(),
-            ),
-        ];
+        let mut args = Vec::new();
+        push_default_arg(&mut args, config, "--model", config.model.clone());
+        push_default_arg(
+            &mut args,
+            config,
+            "--tensor-parallel-size",
+            config.candidate.parallelism.tensor.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--gpu-memory-utilization",
+            format!("{:.2}", config.candidate.memory.fraction),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--max-model-len",
+            config.max_model_len.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--max-num-batched-tokens",
+            config.candidate.scheduler.prefill_token_budget.to_string(),
+        );
         args.extend(config.serve_args.clone());
         args
     }

@@ -5,11 +5,12 @@ use std::path::Path;
 use crate::cli::parse_args;
 use crate::config::ServingConfig;
 use crate::engine::Mode;
-use crate::engines::adapter_for;
+use crate::engines::{adapter_for, EngineAdapter};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{write_trial_result, ResultSet, TrialResult};
 use crate::runner::{execute_run_plan, execute_server_plan};
+use crate::serve::EngineArg;
 use crate::Result;
 
 pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()> {
@@ -18,7 +19,7 @@ pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()
         Mode::Plan => print_plan(&setup, &mut out),
         Mode::Params => print_params(&setup, &mut out),
         Mode::Serve => serve(&setup, &mut out),
-        Mode::Run => run_benchmark(&setup, &mut out),
+        Mode::Run | Mode::Sweep => run_benchmark(&setup, &mut out),
         Mode::Advise => advise(&setup, &mut out),
     }
 }
@@ -123,23 +124,39 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 
 fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
-    let candidate = adapter.initial_candidate(setup);
-    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
-    let plan = adapter.run_plan(&config);
+    let configs = benchmark_configs(setup, adapter);
     if !setup.execute {
-        writeln!(out, "server: {}", plan.server.shell()).map_err(write_error)?;
-        writeln!(out, "benchmark: {}", plan.benchmark.shell()).map_err(write_error)?;
+        if setup.validate_params {
+            validate_serving_configs_from_cache(setup, adapter, &configs)?;
+        }
+        print_run_plans(adapter, &configs, out)?;
         return Ok(());
     }
     ensure_hf_token()?;
-    validate_serving_args(setup, &config)?;
-    let output = execute_run_plan(&plan, &mut *out)?;
-    let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
     let mut results = ResultSet::new(setup.metric);
-    results.push(result);
+    let total = configs.len();
+
+    for (index, config) in configs.into_iter().enumerate() {
+        writeln!(
+            out,
+            "trial: {}/{} candidate: {}",
+            index + 1,
+            total,
+            describe_config(adapter, &config)
+        )
+        .map_err(write_error)?;
+        validate_serving_args(setup, &config)?;
+        let plan = adapter.run_plan(&config);
+        let output = execute_run_plan(&plan, &mut *out)?;
+        let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
+        let files = write_trial_result(&setup.results_dir, &result)?;
+        writeln!(out, "result_raw: {}", files.raw.display()).map_err(write_error)?;
+        writeln!(out, "result_summary: {}", files.summary.display()).map_err(write_error)?;
+        results.push(result);
+    }
+
     results.sort_best_first();
-    let best = results.best().expect("just pushed one result");
-    let files = write_trial_result(&setup.results_dir, best)?;
+    let best = results.best().ok_or("no benchmark results produced")?;
     writeln!(
         out,
         "winning_metric: {}={}",
@@ -149,9 +166,71 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
             .unwrap_or_else(|| "unavailable".to_string())
     )
     .map_err(write_error)?;
-    writeln!(out, "result_raw: {}", files.raw.display()).map_err(write_error)?;
-    writeln!(out, "result_summary: {}", files.summary.display()).map_err(write_error)?;
+    writeln!(
+        out,
+        "best_candidate: {}",
+        describe_config(adapter, &best.config)
+    )
+    .map_err(write_error)?;
     Ok(())
+}
+
+fn benchmark_configs(setup: &crate::cli::Setup, adapter: &dyn EngineAdapter) -> Vec<ServingConfig> {
+    let base = adapter.initial_candidate(setup);
+    let serve_sweeps = setup.serve_sweep.combinations();
+    let mut configs = Vec::new();
+
+    for candidate in setup.sweep.candidates(&base, setup.gpus).into_iter() {
+        for serve_args in &serve_sweeps {
+            let mut config = ServingConfig::from_setup_and_candidate(setup, candidate.clone());
+            config.serve_args.extend(serve_args.clone());
+            configs.push(config);
+        }
+    }
+
+    configs
+}
+
+fn print_run_plans(
+    adapter: &dyn EngineAdapter,
+    configs: &[ServingConfig],
+    out: &mut impl Write,
+) -> Result<()> {
+    for (index, config) in configs.iter().enumerate() {
+        let plan = adapter.run_plan(config);
+        if configs.len() > 1 {
+            writeln!(
+                out,
+                "trial: {}/{} candidate: {}",
+                index + 1,
+                configs.len(),
+                describe_config(adapter, config)
+            )
+            .map_err(write_error)?;
+        }
+        writeln!(out, "server: {}", plan.server.shell()).map_err(write_error)?;
+        writeln!(out, "benchmark: {}", plan.benchmark.shell()).map_err(write_error)?;
+    }
+    Ok(())
+}
+
+fn describe_config(adapter: &dyn EngineAdapter, config: &ServingConfig) -> String {
+    let mut description = adapter.describe_candidate(&config.candidate);
+    if !config.serve_args.is_empty() {
+        description.push_str(", serve_args=");
+        description.push_str(&describe_engine_args(&config.serve_args));
+    }
+    description
+}
+
+fn describe_engine_args(args: &[EngineArg]) -> String {
+    args.iter()
+        .map(|arg| match &arg.value {
+            Some(value) => format!("{}={value}", arg.name),
+            None => arg.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn advise(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
@@ -206,6 +285,25 @@ fn validate_serving_args(setup: &crate::cli::Setup, config: &ServingConfig) -> R
         }
         Err(err) => Err(err),
     }
+}
+
+fn validate_serving_configs_from_cache(
+    setup: &crate::cli::Setup,
+    adapter: &dyn EngineAdapter,
+    configs: &[ServingConfig],
+) -> Result<()> {
+    let Some(config) = configs.first() else {
+        return Ok(());
+    };
+    let schema = load_cached_or_hint(
+        adapter,
+        config.image.clone(),
+        Path::new(&setup.param_cache_dir),
+    )?;
+    for config in configs {
+        schema.validate_args(&adapter.serving_args(config))?;
+    }
+    Ok(())
 }
 
 fn write_error(err: std::io::Error) -> String {

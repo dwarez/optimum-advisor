@@ -71,6 +71,22 @@ pub(crate) fn append_engine_args(args: &mut Vec<String>, engine_args: Vec<Engine
     }
 }
 
+pub(crate) fn push_default_arg(
+    args: &mut Vec<EngineArg>,
+    config: &ServingConfig,
+    name: &str,
+    value: impl Into<String>,
+) {
+    let arg = EngineArg::value(name, value);
+    if !config
+        .serve_args
+        .iter()
+        .any(|existing| existing.name == arg.name)
+    {
+        args.push(arg);
+    }
+}
+
 pub(crate) fn http_readiness(config: &ServingConfig, port: u16, path: &str) -> Readiness {
     Readiness {
         host: config.host.clone(),
@@ -109,6 +125,8 @@ mod tests {
             execute: false,
             log_file: None,
             candidate: Candidate::default(),
+            sweep: crate::trial::CandidateSweep::default(),
+            serve_sweep: crate::serve::ServingParamSweep::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
         }

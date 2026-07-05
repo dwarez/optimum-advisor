@@ -7,7 +7,8 @@ use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
 use super::{
-    append_engine_args, docker_server_args, http_readiness, server_container_name, EngineAdapter,
+    append_engine_args, docker_server_args, http_readiness, push_default_arg,
+    server_container_name, EngineAdapter,
 };
 
 pub(super) static SGLANG: SglangAdapter = SglangAdapter;
@@ -84,24 +85,34 @@ impl EngineAdapter for SglangAdapter {
     }
 
     fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg> {
-        let mut args = vec![
-            EngineArg::value("--model-path", config.model.clone()),
-            EngineArg::value("--host", "0.0.0.0"),
-            EngineArg::value("--port", "30000"),
-            EngineArg::value("--tp-size", config.candidate.parallelism.tensor.to_string()),
-            EngineArg::value(
-                "--mem-fraction-static",
-                format!("{:.2}", config.candidate.memory.fraction),
-            ),
-            EngineArg::value(
-                "--chunked-prefill-size",
-                config.candidate.scheduler.prefill_token_budget.to_string(),
-            ),
-            EngineArg::value(
-                "--max-running-requests",
-                config.candidate.scheduler.max_running_requests.to_string(),
-            ),
-        ];
+        let mut args = Vec::new();
+        push_default_arg(&mut args, config, "--model-path", config.model.clone());
+        push_default_arg(&mut args, config, "--host", "0.0.0.0");
+        push_default_arg(&mut args, config, "--port", "30000");
+        push_default_arg(
+            &mut args,
+            config,
+            "--tp-size",
+            config.candidate.parallelism.tensor.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--mem-fraction-static",
+            format!("{:.2}", config.candidate.memory.fraction),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--chunked-prefill-size",
+            config.candidate.scheduler.prefill_token_budget.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--max-running-requests",
+            config.candidate.scheduler.max_running_requests.to_string(),
+        );
         args.extend(config.serve_args.clone());
         args
     }

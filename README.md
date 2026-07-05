@@ -38,6 +38,8 @@ For now it contains:
   concurrency, plus random input/output lengths for synthetic benchmark data
 - result settings: winning metric from `--metric` and result files under
   `.optimum-advisor/results` unless `--results-dir` is set
+- engine-specific serving args and sweeps from `[serve]` and `[sweep]` sections
+  in a config file
 
 The engine adapter turns that configuration into concrete commands. For example,
 vLLM maps the abstract candidate to `--tensor-parallel-size`,
@@ -50,17 +52,20 @@ inside the same SGLang image.
 
 ## What Exists
 
-- Rust CLI backbone with `plan`, `params`, `serve`, `run`, and `advise` modes.
+- Rust CLI backbone with `plan`, `params`, `serve`, `run`, `sweep`, and
+  `advise` modes.
 - First-class executable serving configuration in code.
 - Engine-specific adapter folders for vLLM and SGLang under `src/engines/`.
 - Abstract candidate configuration for parallelism, memory budget, and scheduler
   budget, rendered into engine-specific serving flags.
+- Full run configs through `--config`, including engine, model, benchmark
+  settings, serving args, and engine-specific serving-parameter sweeps.
 - Runtime parameter introspection from the selected container image.
 - Cached parameter schemas under `.optimum-advisor/params`.
 - Basic validation for extra serving args against the introspected schema.
 - Docker command construction for serving containers, including GPU passthrough.
 - Serving containers are named/labeled per CLI process and cleaned up after
-  `serve --execute` / `run --execute` finish.
+  `serve --execute`, `run --execute`, or `sweep` finish.
 - vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
   image.
 - SGLang benchmark invocation through `python3 -m sglang.bench_serving`
@@ -81,17 +86,36 @@ cargo run -- plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-
 cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
 cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8
 cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
+cargo run -- sweep --config examples/sweep.conf --dry-run
 ```
 
-The last command is a dry run unless `--execute` is passed. It should print a
-server Docker command and a benchmark Docker command.
+The `sweep --dry-run` command prints the server and benchmark Docker commands.
+
+Config files can replace the run CLI args. Values in `[sweep]` are real engine
+serving parameters and are validated against the selected engine image when
+executing:
+
+```text
+engine = vllm
+model = Qwen/Qwen3-4B-Instruct-2507
+gpus = 2
+metric = tps
+
+[benchmark]
+num_prompts = 4
+request_rate = 1
+
+[sweep]
+tensor-parallel-size = 1,2
+gpu-memory-utilization = 0.80,0.90
+```
 
 GPU smoke run:
 
 ```bash
 export HF_TOKEN=hf_...
 cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
-cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --max-model-len 8192 --metric tps --results-dir .optimum-advisor/results --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --execute
+cargo run -- sweep --config examples/sweep.conf
 cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --execute
 ```
 
@@ -101,7 +125,8 @@ cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --
 - Expand structured benchmark metrics and engine-specific parsers beyond the
   current common throughput/latency summary fields.
 - Persist trials, outcomes, configs, and metrics in a real run history.
-- Add a proper search loop over candidates instead of one-step advice.
+- Make candidate search failure-tolerant so OOM/bad candidates are recorded and
+  skipped instead of aborting the whole sweep.
 - Improve engine-specific heuristics for OOM, KV pressure, batching, tensor
   parallelism, pipeline parallelism, and memory utilization.
 - Add hardware/model discovery instead of requiring most setup details manually.

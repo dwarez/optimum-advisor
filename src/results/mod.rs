@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::ServingConfig;
 use crate::engine::Metric;
+use crate::serve::EngineArg;
 use crate::Result;
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -137,7 +138,7 @@ pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result
 
     let stem = format!(
         "trial-{}-{}-{}",
-        now_millis()?,
+        now_nanos()?,
         result.config.engine,
         std::process::id()
     );
@@ -184,7 +185,7 @@ fn raw_text(result: &TrialResult) -> String {
 
 fn summary_tsv(result: &TrialResult, raw_path: &Path) -> String {
     format!(
-        "engine\tmodel\twinning_metric\twinning_value\ttp\tmemory_fraction\tprefill_token_budget\tmax_running_requests\trequest_throughput\toutput_token_throughput\ttotal_token_throughput\tmean_ttft_ms\tmean_itl_ms\traw_file\n{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "engine\tmodel\twinning_metric\twinning_value\ttp\tmemory_fraction\tprefill_token_budget\tmax_running_requests\tserve_args\trequest_throughput\toutput_token_throughput\ttotal_token_throughput\tmean_ttft_ms\tmean_itl_ms\traw_file\n{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         result.config.engine,
         result.config.model,
         result.winning_metric,
@@ -193,6 +194,7 @@ fn summary_tsv(result: &TrialResult, raw_path: &Path) -> String {
         result.config.candidate.memory.fraction,
         result.config.candidate.scheduler.prefill_token_budget,
         result.config.candidate.scheduler.max_running_requests,
+        format_engine_args(&result.config.serve_args),
         fmt_value(result.metrics.request_throughput),
         fmt_value(result.metrics.output_token_throughput),
         fmt_value(result.metrics.total_token_throughput),
@@ -206,10 +208,20 @@ fn fmt_value(value: Option<f64>) -> String {
     value.map(|value| format!("{value:.4}")).unwrap_or_default()
 }
 
-fn now_millis() -> Result<u128> {
+fn format_engine_args(args: &[EngineArg]) -> String {
+    args.iter()
+        .map(|arg| match &arg.value {
+            Some(value) => format!("{}={value}", arg.name),
+            None => arg.name.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn now_nanos() -> Result<u128> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
+        .map(|duration| duration.as_nanos())
         .map_err(|err| format!("system clock is before unix epoch: {err}"))
 }
 

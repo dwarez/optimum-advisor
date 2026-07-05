@@ -68,5 +68,6 @@ pub enum Mode {
     Params,
     Serve,
     Run,
+    Sweep,
     Advise,
 }
