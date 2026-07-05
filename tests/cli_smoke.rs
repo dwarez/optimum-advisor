@@ -75,9 +75,9 @@ fn params_dry_run_prints_container_inspection_command() {
 }
 
 #[test]
-fn run_dry_run_prints_server_and_benchmark_commands() {
+fn bench_dry_run_prints_server_and_benchmark_commands() {
     let output = run(&[
-        "run",
+        "bench",
         "--engine",
         "sglang",
         "--model",
@@ -86,6 +86,7 @@ fn run_dry_run_prints_server_and_benchmark_commands() {
         "4",
         "--random-output-len",
         "32",
+        "--dry-run",
     ]);
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -98,9 +99,65 @@ fn run_dry_run_prints_server_and_benchmark_commands() {
 }
 
 #[test]
+fn sweep_dry_run_prints_sweep_trials() {
+    let output = run(&[
+        "sweep",
+        "--engine",
+        "vllm",
+        "--model",
+        "m",
+        "--gpus",
+        "2",
+        "--sweep-tp",
+        "1,2",
+        "--sweep-memory-fraction",
+        "0.8,0.9",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("trial: 1/4"));
+    assert!(text.contains("trial: 4/4"));
+    assert!(text.contains("--tensor-parallel-size 2"));
+    assert!(text.contains("--gpu-memory-utilization 0.80"));
+}
+
+#[test]
+fn bench_dry_run_accepts_full_config_file() {
+    let output = run(&["bench", "--config", "examples/bench.conf", "--dry-run"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(!text.contains("trial:"));
+    assert!(text.contains("--tensor-parallel-size 1"));
+    assert!(text.contains("--gpu-memory-utilization 0.90"));
+    assert!(text.contains("Qwen/Qwen3-4B-Instruct-2507"));
+}
+
+#[test]
+fn bench_rejects_sweep_config_file() {
+    let output = run(&["bench", "--config", "examples/sweep.conf", "--dry-run"]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("bench accepts one configuration"));
+}
+
+#[test]
+fn sweep_dry_run_accepts_full_config_file() {
+    let output = run(&["sweep", "--config", "examples/sweep.conf", "--dry-run"]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("trial: 1/4"));
+    assert!(text.contains("--tensor-parallel-size 2"));
+    assert!(text.contains("--gpu-memory-utilization 0.80"));
+}
+
+#[test]
 fn direct_engine_flags_are_forwarded_to_the_server() {
     let output = run(&[
-        "run",
+        "bench",
         "--engine",
         "vllm",
         "--model",
@@ -108,6 +165,7 @@ fn direct_engine_flags_are_forwarded_to_the_server() {
         "--kv-cache-dtype",
         "fp8",
         "--disable-log-stats",
+        "--dry-run",
     ]);
 
     assert!(output.status.success(), "{}", stderr(&output));
@@ -117,8 +175,16 @@ fn direct_engine_flags_are_forwarded_to_the_server() {
 }
 
 #[test]
-fn run_execute_requires_hf_token() {
-    let output = run_without_hf_token(&["run", "--engine", "vllm", "--model", "m", "--execute"]);
+fn bench_execute_requires_hf_token() {
+    let output = run_without_hf_token(&["bench", "--engine", "vllm", "--model", "m"]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("HF_TOKEN is required"));
+}
+
+#[test]
+fn sweep_requires_hf_token_by_default() {
+    let output = run_without_hf_token(&["sweep", "--config", "examples/sweep.conf"]);
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("HF_TOKEN is required"));
@@ -146,6 +212,39 @@ fn validate_params_rejects_unknown_cached_arg_without_docker() {
         "--validate-params",
         "--serve-arg",
         "definitely-not-a-real-param=x",
+    ]);
+
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("unknown serving parameter"));
+}
+
+#[test]
+fn validate_params_rejects_unknown_config_sweep_arg_without_docker() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "optimum-advisor-config-smoke-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+    fs::write(
+        cache_path(&cache_dir, Engine::Vllm, "vllm/vllm-openai:latest"),
+        "value\t--model\tmodel\nvalue\t--tensor-parallel-size\ttensor_parallel_size\n",
+    )
+    .unwrap();
+    let config = cache_dir.join("sweep.conf");
+    fs::write(
+        &config,
+        "engine = vllm\nmodel = m\n[sweep]\ndefinitely-not-real = 1,2\n",
+    )
+    .unwrap();
+
+    let output = run(&[
+        "sweep",
+        "--config",
+        config.to_str().unwrap(),
+        "--param-cache-dir",
+        cache_dir.to_str().unwrap(),
+        "--validate-params",
+        "--dry-run",
     ]);
 
     assert!(!output.status.success());

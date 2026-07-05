@@ -7,7 +7,8 @@ use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
 use super::{
-    append_engine_args, docker_server_args, http_readiness, server_container_name, EngineAdapter,
+    append_engine_args, docker_server_args, http_readiness, push_default_arg,
+    server_container_name, EngineAdapter,
 };
 
 const VLLM_ARGPARSE_INTROSPECTION: &str = r#"
@@ -57,9 +58,16 @@ impl EngineAdapter for VllmAdapter {
     fn initial_candidate(&self, setup: &Setup) -> Candidate {
         let mut candidate = setup.candidate.clone();
         candidate.scheduler.prefill_token_budget = match setup.metric {
-            Metric::Ttft => 16_384,
-            Metric::Itl => 2_048,
-            Metric::Tps => 8_192,
+            Metric::Ttft | Metric::P90Ttft | Metric::P95Ttft | Metric::P99Ttft => 16_384,
+            Metric::Tpot
+            | Metric::P90Tpot
+            | Metric::P95Tpot
+            | Metric::P99Tpot
+            | Metric::Itl
+            | Metric::P90Itl
+            | Metric::P95Itl
+            | Metric::P99Itl => 2_048,
+            _ => 8_192,
         };
         candidate.clamp_to_gpus(setup.gpus);
         candidate
@@ -105,22 +113,32 @@ impl EngineAdapter for VllmAdapter {
     }
 
     fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg> {
-        let mut args = vec![
-            EngineArg::value("--model", config.model.clone()),
-            EngineArg::value(
-                "--tensor-parallel-size",
-                config.candidate.parallelism.tensor.to_string(),
-            ),
-            EngineArg::value(
-                "--gpu-memory-utilization",
-                format!("{:.2}", config.candidate.memory.fraction),
-            ),
-            EngineArg::value("--max-model-len", config.max_model_len.to_string()),
-            EngineArg::value(
-                "--max-num-batched-tokens",
-                config.candidate.scheduler.prefill_token_budget.to_string(),
-            ),
-        ];
+        let mut args = Vec::new();
+        push_default_arg(&mut args, config, "--model", config.model.clone());
+        push_default_arg(
+            &mut args,
+            config,
+            "--tensor-parallel-size",
+            config.candidate.parallelism.tensor.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--gpu-memory-utilization",
+            format!("{:.2}", config.candidate.memory.fraction),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--max-model-len",
+            config.max_model_len.to_string(),
+        );
+        push_default_arg(
+            &mut args,
+            config,
+            "--max-num-batched-tokens",
+            config.candidate.scheduler.prefill_token_budget.to_string(),
+        );
         args.extend(config.serve_args.clone());
         args
     }

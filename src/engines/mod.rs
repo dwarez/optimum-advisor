@@ -11,6 +11,9 @@ use crate::trial::Candidate;
 mod sglang;
 mod vllm;
 
+pub mod params;
+pub mod serve;
+
 pub trait EngineAdapter {
     fn engine(&self) -> Engine;
     fn help_command(&self, image: String) -> crate::runner::ProcessSpec;
@@ -68,6 +71,22 @@ pub(crate) fn append_engine_args(args: &mut Vec<String>, engine_args: Vec<Engine
     }
 }
 
+pub(crate) fn push_default_arg(
+    args: &mut Vec<EngineArg>,
+    config: &ServingConfig,
+    name: &str,
+    value: impl Into<String>,
+) {
+    let arg = EngineArg::value(name, value);
+    if !config
+        .serve_args
+        .iter()
+        .any(|existing| existing.name == arg.name)
+    {
+        args.push(arg);
+    }
+}
+
 pub(crate) fn http_readiness(config: &ServingConfig, port: u16, path: &str) -> Readiness {
     Readiness {
         host: config.host.clone(),
@@ -101,10 +120,13 @@ mod tests {
             param_cache_dir: ".optimum-advisor/params".to_string(),
             refresh_params: false,
             validate_params: false,
+            results_dir: ".optimum-advisor/results".to_string(),
             metric: Metric::Tps,
             execute: false,
             log_file: None,
             candidate: Candidate::default(),
+            sweep: crate::trial::CandidateSweep::default(),
+            serve_sweep: crate::serve::ServingParamSweep::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
         }
