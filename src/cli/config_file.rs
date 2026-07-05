@@ -45,7 +45,7 @@ pub fn parse_memory_fraction_list(value: &str, label: &str) -> Result<Vec<f32>> 
 }
 
 fn parse_config_text(setup: &mut Setup, text: &str) -> Result<()> {
-    let mut section = Section::Run;
+    let mut section = Section::Top;
     for (index, line) in text.lines().enumerate() {
         let line = line.split('#').next().unwrap_or("").trim();
         if line.is_empty() {
@@ -65,7 +65,7 @@ fn parse_config_text(setup: &mut Setup, text: &str) -> Result<()> {
         let key = normalize_key(key);
         let value = clean_value(value);
         match section {
-            Section::Run => apply_run_key(setup, &key, &value, index + 1)?,
+            Section::Top => apply_top_key(setup, &key, &value, index + 1)?,
             Section::Benchmark => apply_benchmark_key(setup, &key, &value, index + 1)?,
             Section::Serve => apply_serve_key(setup, &key, &value)?,
             Section::Sweep => apply_sweep_key(&mut setup.serve_sweep, &key, &value)?,
@@ -74,7 +74,7 @@ fn parse_config_text(setup: &mut Setup, text: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_run_key(setup: &mut Setup, key: &str, value: &str, line: usize) -> Result<()> {
+fn apply_top_key(setup: &mut Setup, key: &str, value: &str, line: usize) -> Result<()> {
     match key {
         "engine" => setup.engine = Engine::parse(value)?,
         "model" => setup.model = value.to_string(),
@@ -98,7 +98,7 @@ fn apply_run_key(setup: &mut Setup, key: &str, value: &str, line: usize) -> Resu
         "max_running_requests" | "max_concurrency" => {
             setup.candidate.scheduler.max_running_requests = parse_value(value, key)?;
         }
-        _ => return Err(format!("unknown run config key '{key}' on line {line}")),
+        _ => return Err(format!("unknown config key '{key}' on line {line}")),
     }
     Ok(())
 }
@@ -203,7 +203,7 @@ fn clean_value(value: &str) -> String {
 
 #[derive(Clone, Copy)]
 enum Section {
-    Run,
+    Top,
     Benchmark,
     Serve,
     Sweep,
@@ -212,7 +212,7 @@ enum Section {
 impl Section {
     fn parse(value: &str, line: usize) -> Result<Self> {
         match normalize_key(value).as_str() {
-            "run" => Ok(Self::Run),
+            "bench" => Ok(Self::Top),
             "benchmark" => Ok(Self::Benchmark),
             "serve" | "serving" => Ok(Self::Serve),
             "sweep" => Ok(Self::Sweep),
@@ -227,7 +227,7 @@ mod tests {
     use crate::engine::Mode;
 
     fn setup() -> Setup {
-        Setup::default_for_mode(Mode::Run)
+        Setup::default_for_mode(Mode::Bench)
     }
 
     #[test]
@@ -286,6 +286,6 @@ mod tests {
     fn rejects_unknown_config_keys() {
         let mut setup = setup();
         let err = parse_config_text(&mut setup, "wat = nope").unwrap_err();
-        assert!(err.contains("unknown run config key"));
+        assert!(err.contains("unknown config key"));
     }
 }

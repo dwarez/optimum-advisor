@@ -38,8 +38,8 @@ For now it contains:
   concurrency, plus random input/output lengths for synthetic benchmark data
 - result settings: winning metric from `--metric`; each execution writes a
   subdirectory under `.optimum-advisor/results` unless `--results-dir` is set
-- engine-specific serving args and sweeps from `[serve]` and `[sweep]` sections
-  in a config file
+- engine-specific serving args from `[serve]`; sweep configs additionally use a
+  `[sweep]` section
 
 The engine adapter turns that configuration into concrete commands. For example,
 vLLM maps the abstract candidate to `--tensor-parallel-size`,
@@ -52,20 +52,20 @@ inside the same SGLang image.
 
 ## What Exists
 
-- Rust CLI backbone with `plan`, `params`, `serve`, `run`, `sweep`, and
+- Rust CLI backbone with `plan`, `params`, `serve`, `bench`, `sweep`, and
   `advise` modes.
 - First-class executable serving configuration in code.
 - Engine-specific adapter folders for vLLM and SGLang under `src/engines/`.
 - Abstract candidate configuration for parallelism, memory budget, and scheduler
   budget, rendered into engine-specific serving flags.
-- Full run configs through `--config`, including engine, model, benchmark
-  settings, serving args, and engine-specific serving-parameter sweeps.
+- Full configs through `--config`: `bench` consumes one exact config, while
+  `sweep` consumes configs with engine-specific serving-parameter sweeps.
 - Runtime parameter introspection from the selected container image.
 - Cached parameter schemas under `.optimum-advisor/params`.
 - Basic validation for extra serving args against the introspected schema.
 - Docker command construction for serving containers, including GPU passthrough.
 - Serving containers are named/labeled per CLI process and cleaned up after
-  `serve --execute`, `run --execute`, or `sweep` finish.
+  `serve --execute`, `bench`, or `sweep` finish.
 - vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
   image.
 - SGLang benchmark invocation through `python3 -m sglang.bench_serving`
@@ -84,15 +84,17 @@ Local checks that do not need a GPU:
 ```bash
 cargo test
 cargo run -- plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
-cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
-cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8
-cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
+cargo run -- bench --config examples/bench.conf --dry-run
+cargo run -- bench --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8 --dry-run
+cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --dry-run
 cargo run -- sweep --config examples/sweep.conf --dry-run
 ```
 
-The `sweep --dry-run` command prints the server and benchmark Docker commands.
+`bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
+pair per candidate.
 
-Config files can replace the run CLI args. Values in `[sweep]` are real engine
+Config files can replace the CLI args. A single-benchmark config has `[serve]` and no
+`[sweep]`; a sweep config adds `[sweep]`. Values in `[sweep]` are real engine
 serving parameters and are validated against the selected engine image when
 executing:
 
@@ -111,13 +113,14 @@ tensor-parallel-size = 1,2
 gpu-memory-utilization = 0.80,0.90
 ```
 
-GPU smoke run:
+GPU smoke benchmark:
 
 ```bash
 export HF_TOKEN=hf_...
 cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
 cargo run -- sweep --config examples/sweep.conf
-cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --execute
+cargo run -- bench --config .optimum-advisor/results/<sweep-dir>/best.conf
+cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
 ```
 
 ## Missing / TODO
@@ -125,7 +128,7 @@ cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --
 - Make SGLang parameter introspection as robust as vLLM's argparse-based path.
 - Expand structured benchmark metrics and engine-specific parsers beyond the
   current common throughput/latency summary fields.
-- Persist trials, outcomes, configs, and metrics in a real run history.
+- Persist trials, outcomes, configs, and metrics in a real execution history.
 - Make candidate search failure-tolerant so OOM/bad candidates are recorded and
   skipped instead of aborting the whole sweep.
 - Improve engine-specific heuristics for OOM, KV pressure, batching, tensor

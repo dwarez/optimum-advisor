@@ -9,7 +9,8 @@ use crate::engines::{adapter_for, EngineAdapter};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
-    create_run_dir, write_best_config, write_trial_result, ResultSet, TrialResult,
+    create_run_dir, write_best_config, write_config_file, write_trial_result, ResultSet,
+    TrialResult,
 };
 use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::serve::EngineArg;
@@ -22,7 +23,8 @@ pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()
         Mode::Plan => print_plan(&setup, &mut out),
         Mode::Params => print_params(&setup, &mut out),
         Mode::Serve => serve(&setup, &mut out),
-        Mode::Run | Mode::Sweep => run_benchmark(&setup, &mut out),
+        Mode::Bench => bench_once(&setup, &mut out),
+        Mode::Sweep => run_sweep(&setup, &mut out),
         Mode::Advise => advise(&setup, &mut out),
     }
 }
@@ -89,7 +91,7 @@ fn print_params(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         writeln!(out, "source: runtime only").map_err(write_error)?;
         writeln!(
             out,
-            "run with --execute to inspect the container and cache the schema"
+            "add --execute to inspect the container and cache the schema"
         )
         .map_err(write_error)?;
         return Ok(());
@@ -125,7 +127,47 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     execute_server_plan(&plan, out)
 }
 
-fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
+fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
+    let adapter = adapter_for(setup.engine);
+    let candidate = adapter.initial_candidate(setup);
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    if !setup.execute {
+        if setup.validate_params {
+            validate_serving_configs_from_cache(setup, adapter, std::slice::from_ref(&config))?;
+        }
+        print_run_plans(adapter, &[config], out)?;
+        return Ok(());
+    }
+
+    ensure_hf_token()?;
+    let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
+    terminal::info(out, "bench", describe_config(adapter, &config))?;
+    terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
+    validate_serving_args(setup, &config)?;
+    let plan = adapter.run_plan(&config);
+    let output = execute_run_plan(&plan, &mut *out)?;
+    let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
+    let files = write_trial_result(&run_dir, &result)?;
+    let config_file = write_config_file(
+        &run_dir,
+        "config.conf",
+        &executable_config_text(setup, adapter, &result.config),
+    )?;
+    terminal::ok(out, "metrics", metrics_line(&result))?;
+    terminal::info(
+        out,
+        "saved",
+        format!(
+            "summary={}, raw={}, config={}",
+            files.summary.display(),
+            files.raw.display(),
+            config_file.display()
+        ),
+    )?;
+    Ok(())
+}
+
+fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let configs = benchmark_configs(setup, adapter);
     if !setup.execute {
@@ -138,7 +180,7 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
     ensure_hf_token()?;
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
-    let run_dir = create_run_dir(&setup.results_dir, setup.engine)?;
+    let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
     terminal::info(
         out,
         "sweep",
@@ -178,7 +220,10 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
 
     results.sort_best_first();
     let best = results.best().ok_or("no benchmark results produced")?;
-    let best_config = write_best_config(&run_dir, &best_config_text(setup, adapter, &best.config))?;
+    let best_config = write_best_config(
+        &run_dir,
+        &executable_config_text(setup, adapter, &best.config),
+    )?;
     terminal::ok(
         out,
         "best",
@@ -294,7 +339,7 @@ fn metrics_line(result: &TrialResult) -> String {
     }
 }
 
-fn best_config_text(
+fn executable_config_text(
     setup: &crate::cli::Setup,
     adapter: &dyn EngineAdapter,
     config: &ServingConfig,
@@ -465,7 +510,7 @@ mod tests {
 
     #[test]
     fn config_description_uses_effective_server_args() {
-        let mut setup = crate::cli::Setup::default_for_mode(Mode::Run);
+        let mut setup = crate::cli::Setup::default_for_mode(Mode::Bench);
         setup.model = "m".to_string();
         setup.gpus = 2;
         setup
@@ -488,7 +533,7 @@ mod tests {
 
     #[test]
     fn best_config_records_effective_winning_config() {
-        let mut setup = crate::cli::Setup::default_for_mode(Mode::Run);
+        let mut setup = crate::cli::Setup::default_for_mode(Mode::Bench);
         setup.model = "m".to_string();
         setup.gpus = 2;
         setup.benchmark.num_prompts = 4;
@@ -502,7 +547,7 @@ mod tests {
         let candidate = adapter.initial_candidate(&setup);
         let config = ServingConfig::from_setup_and_candidate(&setup, candidate);
 
-        let text = best_config_text(&setup, adapter, &config);
+        let text = executable_config_text(&setup, adapter, &config);
 
         assert!(text.contains("engine = vllm"));
         assert!(text.contains("model = m"));

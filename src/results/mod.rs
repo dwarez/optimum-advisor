@@ -132,10 +132,10 @@ pub struct ResultFiles {
     pub summary: PathBuf,
 }
 
-pub fn create_run_dir(root: impl AsRef<Path>, engine: Engine) -> Result<PathBuf> {
+pub fn create_run_dir(root: impl AsRef<Path>, kind: &str, engine: Engine) -> Result<PathBuf> {
     let root = root.as_ref();
     let dir = root.join(format!(
-        "run-{}-{}-{}",
+        "{kind}-{}-{}-{}",
         now_nanos()?,
         engine,
         std::process::id()
@@ -166,7 +166,11 @@ pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result
 }
 
 pub fn write_best_config(dir: impl AsRef<Path>, text: &str) -> Result<PathBuf> {
-    let path = dir.as_ref().join("best.conf");
+    write_config_file(dir, "best.conf", text)
+}
+
+pub fn write_config_file(dir: impl AsRef<Path>, name: &str, text: &str) -> Result<PathBuf> {
+    let path = dir.as_ref().join(name);
     fs::write(&path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
     Ok(path)
 }
@@ -357,14 +361,15 @@ Mean ITL (ms):                           33.61",
     #[test]
     fn creates_run_dir_and_best_config() {
         let root = std::env::temp_dir().join(format!(
-            "optimum-advisor-run-dir-test-{}",
+            "optimum-advisor-result-dir-test-{}",
             std::process::id()
         ));
 
-        let dir = create_run_dir(&root, Engine::Vllm).unwrap();
+        let dir = create_run_dir(&root, "sweep", Engine::Vllm).unwrap();
         let best = write_best_config(&dir, "engine = vllm\n").unwrap();
 
         assert!(dir.starts_with(&root));
+        assert!(dir.file_name().unwrap().to_string_lossy().contains("sweep"));
         assert!(dir.file_name().unwrap().to_string_lossy().contains("vllm"));
         assert_eq!(best.file_name().unwrap(), "best.conf");
         assert_eq!(fs::read_to_string(best).unwrap(), "engine = vllm\n");

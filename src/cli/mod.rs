@@ -69,7 +69,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
         Some("plan") => Mode::Plan,
         Some("params") => Mode::Params,
         Some("serve") => Mode::Serve,
-        Some("run") => Mode::Run,
+        Some("bench") => Mode::Bench,
         Some("sweep") => Mode::Sweep,
         Some("advise") => Mode::Advise,
         Some("-h" | "--help") | None => return Err(usage()),
@@ -77,7 +77,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
     };
 
     let mut setup = Setup::default_for_mode(mode);
-    if mode == Mode::Sweep {
+    if matches!(mode, Mode::Bench | Mode::Sweep) {
         setup.execute = true;
     }
 
@@ -242,8 +242,26 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
     if setup.gpus == 0 {
         return Err("--gpus must be greater than zero".to_string());
     }
+    if setup.mode == Mode::Bench && has_sweep(&setup) {
+        return Err(
+            "bench accepts one configuration; use sweep for [sweep] or --sweep-*".to_string(),
+        );
+    }
+    if setup.mode == Mode::Sweep && !has_sweep(&setup) {
+        return Err(
+            "sweep requires [sweep] or --sweep-*; use bench for one configuration".to_string(),
+        );
+    }
     setup.candidate.clamp_to_gpus(setup.gpus);
     Ok(setup)
+}
+
+fn has_sweep(setup: &Setup) -> bool {
+    !setup.sweep.tensor_parallelism.is_empty()
+        || !setup.sweep.memory_fraction.is_empty()
+        || !setup.sweep.prefill_token_budget.is_empty()
+        || !setup.sweep.max_running_requests.is_empty()
+        || !setup.serve_sweep.parameters.is_empty()
 }
 
 fn take_value(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
@@ -263,8 +281,8 @@ fn usage() -> String {
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
   optimum-advisor sweep --config PATH [--dry-run]
-  optimum-advisor run --config PATH [--execute]
-  optimum-advisor run --engine vllm|sglang --model MODEL [--gpus N] [--metric ttft|tps|itl] [--results-dir DIR] [--sweep-tp CSV] [--sweep-memory-fraction CSV] [--sweep-prefill-token-budget CSV] [--sweep-max-running-requests CSV] [--num-prompts N] [--request-rate R] --execute
+  optimum-advisor bench --config PATH [--dry-run]
+  optimum-advisor bench --engine vllm|sglang --model MODEL [--gpus N] [--metric ttft|tps|itl] [--results-dir DIR] [--num-prompts N] [--request-rate R] [--dry-run]
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
 }
@@ -353,7 +371,7 @@ mod tests {
     fn accepts_results_dir() {
         let setup = parse_args(
             [
-                "run",
+                "bench",
                 "--engine",
                 "vllm",
                 "--model",
@@ -373,7 +391,7 @@ mod tests {
     fn accepts_sweep_lists() {
         let setup = parse_args(
             [
-                "run",
+                "sweep",
                 "--engine",
                 "vllm",
                 "--model",
@@ -412,7 +430,7 @@ mod tests {
 
         let setup = parse_args(
             [
-                "run",
+                "sweep",
                 "--config",
                 path.to_str().unwrap(),
                 "--sweep-memory-fraction",
@@ -433,10 +451,53 @@ mod tests {
     }
 
     #[test]
+    fn bench_rejects_sweep_parameters() {
+        let err = parse_args(
+            [
+                "bench",
+                "--engine",
+                "vllm",
+                "--model",
+                "m",
+                "--sweep-tp",
+                "1,2",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("bench accepts one configuration"));
+    }
+
+    #[test]
+    fn bench_executes_by_default_but_supports_dry_run() {
+        let setup = parse_args(
+            ["bench", "--engine", "vllm", "--model", "m"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert!(setup.execute);
+
+        let setup = parse_args(
+            ["bench", "--engine", "vllm", "--model", "m", "--dry-run"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap();
+        assert!(!setup.execute);
+    }
+
+    #[test]
     fn sweep_executes_by_default_but_supports_dry_run() {
         let path =
             std::env::temp_dir().join(format!("optimum-advisor-sweep-{}.conf", std::process::id()));
-        fs::write(&path, "engine = vllm\nmodel = m\n").unwrap();
+        fs::write(
+            &path,
+            "engine = vllm\nmodel = m\n[sweep]\ntensor-parallel-size = 1,2\n",
+        )
+        .unwrap();
 
         let setup = parse_args(
             ["sweep", "--config", path.to_str().unwrap()]
@@ -453,5 +514,17 @@ mod tests {
         )
         .unwrap();
         assert!(!setup.execute);
+    }
+
+    #[test]
+    fn sweep_rejects_single_run_configs() {
+        let err = parse_args(
+            ["sweep", "--engine", "vllm", "--model", "m"]
+                .into_iter()
+                .map(String::from),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("sweep requires"));
     }
 }

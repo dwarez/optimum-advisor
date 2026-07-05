@@ -67,7 +67,7 @@ pub enum Mode {
     Plan,
     Params,
     Serve,
-    Run,
+    Bench,
     Sweep,
     Advise,
 }
