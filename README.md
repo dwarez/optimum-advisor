@@ -35,13 +35,16 @@ For now it contains:
   `--long-flags` are forwarded to the selected engine and validated against
   the introspected schema when executing
 - benchmark settings: dataset name, number of prompts, request rate, and max
-  concurrency
+  concurrency, plus random input/output lengths for synthetic benchmark data
 
 The engine adapter turns that configuration into concrete commands. For example,
 vLLM maps the abstract candidate to `--tensor-parallel-size`,
 `--gpu-memory-utilization`, `--max-model-len`, and
 `--max-num-batched-tokens`, then runs `vllm bench serve` from inside the same
-vLLM image.
+vLLM image. SGLang maps the same abstract candidate to `--tp-size`,
+`--mem-fraction-static`, `--chunked-prefill-size`, and
+`--max-running-requests`, then runs `python3 -m sglang.bench_serving` from
+inside the same SGLang image.
 
 ## What Exists
 
@@ -54,8 +57,12 @@ vLLM image.
 - Cached parameter schemas under `.optimum-advisor/params`.
 - Basic validation for extra serving args against the introspected schema.
 - Docker command construction for serving containers, including GPU passthrough.
+- Serving containers are named/labeled per CLI process and cleaned up after
+  `serve --execute` / `run --execute` finish.
 - vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
   image.
+- SGLang benchmark invocation through `python3 -m sglang.bench_serving`
+  inside the selected SGLang image.
 - Initial log classification for OOM and KV-cache pressure.
 - A small sync helper for sending the repo to the GPU machine:
   `scripts/sync-to-gpu.sh`.
@@ -70,6 +77,7 @@ cargo test
 cargo run -- plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
 cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
 cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8
+cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
 ```
 
 The last command is a dry run unless `--execute` is passed. It should print a
@@ -81,12 +89,12 @@ GPU smoke run:
 export HF_TOKEN=hf_...
 cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
 cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --execute
+cargo run -- run --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --execute
 ```
 
 ## Missing / TODO
 
 - Make SGLang parameter introspection as robust as vLLM's argparse-based path.
-- Move SGLang benchmark invocation into its selected engine image.
 - Capture structured benchmark metrics such as TTFT, ITL, TPS, throughput, and
   error rates.
 - Persist trials, outcomes, configs, and metrics in a real run history.
@@ -96,6 +104,6 @@ cargo run -- run --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --ma
 - Add hardware/model discovery instead of requiring most setup details manually.
 - Add constraints to the optimizer, such as latency ceilings or minimum
   throughput.
-- Add safer Docker lifecycle handling, cleanup, logs, names, volumes, and port
-  management.
+- Expand Docker lifecycle handling with better logs, volumes, automatic port
+  selection, and CUDA-host integration coverage.
 - Expand integration tests on an actual CUDA host.

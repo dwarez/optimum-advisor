@@ -6,7 +6,9 @@ use crate::runner::{ProcessSpec, RunPlan};
 use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
-use super::{append_engine_args, docker_server_args, readiness, EngineAdapter};
+use super::{
+    append_engine_args, docker_server_args, http_readiness, server_container_name, EngineAdapter,
+};
 
 pub(super) static SGLANG: SglangAdapter = SglangAdapter;
 
@@ -115,22 +117,53 @@ impl EngineAdapter for SglangAdapter {
 
         RunPlan {
             server: ProcessSpec::new("docker", server_args),
-            benchmark: ProcessSpec::new(
-                "python3",
-                vec![
-                    "-m".to_string(),
-                    "sglang.bench_serving".to_string(),
-                    "--backend".to_string(),
-                    "sglang".to_string(),
-                    "--model".to_string(),
-                    config.model.clone(),
-                    "--dataset-name".to_string(),
-                    config.benchmark.dataset_name.clone(),
-                    "--num-prompts".to_string(),
-                    config.benchmark.num_prompts.to_string(),
-                ],
-            ),
-            readiness: readiness(config, config.port),
+            benchmark: ProcessSpec::new("docker", benchmark_args(config)),
+            readiness: http_readiness(config, config.port, "/v1/models"),
+            server_container: Some(server_container_name(config)),
         }
     }
+}
+
+fn benchmark_args(config: &ServingConfig) -> Vec<String> {
+    vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "--gpus".to_string(),
+        "all".to_string(),
+        "-e".to_string(),
+        "HF_TOKEN".to_string(),
+        "--network".to_string(),
+        "host".to_string(),
+        "--entrypoint".to_string(),
+        "python3".to_string(),
+        config.image.clone(),
+        "-m".to_string(),
+        "sglang.bench_serving".to_string(),
+        "--backend".to_string(),
+        "sglang".to_string(),
+        "--model".to_string(),
+        config.model.clone(),
+        "--host".to_string(),
+        config.host.clone(),
+        "--port".to_string(),
+        config.port.to_string(),
+        "--dataset-name".to_string(),
+        config.benchmark.dataset_name.clone(),
+        "--num-prompts".to_string(),
+        config.benchmark.num_prompts.to_string(),
+        "--request-rate".to_string(),
+        config.benchmark.request_rate.clone(),
+        "--max-concurrency".to_string(),
+        config
+            .benchmark
+            .max_concurrency
+            .unwrap_or(config.benchmark.num_prompts)
+            .to_string(),
+        "--random-input-len".to_string(),
+        config.benchmark.random_input_len.to_string(),
+        "--random-output-len".to_string(),
+        config.benchmark.random_output_len.to_string(),
+        "--random-range-ratio".to_string(),
+        "0.0".to_string(),
+    ]
 }

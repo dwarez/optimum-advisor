@@ -6,7 +6,9 @@ use crate::runner::{ProcessSpec, RunPlan};
 use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
-use super::{append_engine_args, docker_server_args, http_readiness, EngineAdapter};
+use super::{
+    append_engine_args, docker_server_args, http_readiness, server_container_name, EngineAdapter,
+};
 
 const VLLM_ARGPARSE_INTROSPECTION: &str = r#"
 import argparse
@@ -131,6 +133,7 @@ impl EngineAdapter for VllmAdapter {
             server: ProcessSpec::new("docker", server_args),
             benchmark: ProcessSpec::new("docker", benchmark_args(config)),
             readiness: http_readiness(config, config.port, "/v1/models"),
+            server_container: Some(server_container_name(config)),
         }
     }
 }

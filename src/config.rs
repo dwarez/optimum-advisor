@@ -25,6 +25,8 @@ pub struct BenchmarkConfig {
     pub num_prompts: u32,
     pub request_rate: String,
     pub max_concurrency: Option<u32>,
+    pub random_input_len: u32,
+    pub random_output_len: u32,
 }
 
 impl Default for BenchmarkConfig {
@@ -34,6 +36,8 @@ impl Default for BenchmarkConfig {
             num_prompts: 100,
             request_rate: "1".to_string(),
             max_concurrency: Some(1),
+            random_input_len: 1024,
+            random_output_len: 128,
         }
     }
 }
