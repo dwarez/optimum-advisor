@@ -5,6 +5,7 @@ use crate::config::ServingConfig;
 use crate::engine::Engine;
 use crate::logs::Outcome;
 use crate::runner::{Readiness, RunPlan};
+use crate::serve::EngineArg;
 use crate::trial::Candidate;
 
 mod sglang;
@@ -16,6 +17,7 @@ pub trait EngineAdapter {
     fn initial_candidate(&self, setup: &Setup) -> Candidate;
     fn next_candidate(&self, setup: &Setup, last: &Candidate, outcome: Outcome) -> Candidate;
     fn describe_candidate(&self, candidate: &Candidate) -> String;
+    fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg>;
     fn run_plan(&self, config: &ServingConfig) -> RunPlan;
 }
 
@@ -41,8 +43,8 @@ pub(crate) fn docker_server_args(config: &ServingConfig, container_port: &str) -
     ]
 }
 
-pub(crate) fn append_extra_args(config: &ServingConfig, args: &mut Vec<String>) {
-    for arg in &config.serve_args {
+pub(crate) fn append_engine_args(args: &mut Vec<String>, engine_args: Vec<EngineArg>) {
+    for arg in engine_args {
         arg.append_to(args);
     }
 }

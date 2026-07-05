@@ -26,21 +26,24 @@ pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()
 fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
     if setup.validate_params {
-        let image = image_for(setup);
         let schema = if setup.execute {
             load_or_inspect(
                 adapter,
-                image,
+                config.image.clone(),
                 Path::new(&setup.param_cache_dir),
                 setup.refresh_params,
             )?
         } else {
-            load_cached_or_hint(adapter, image, Path::new(&setup.param_cache_dir))?
+            load_cached_or_hint(
+                adapter,
+                config.image.clone(),
+                Path::new(&setup.param_cache_dir),
+            )?
         };
-        schema.validate_args(&setup.serve_args)?;
+        schema.validate_args(&adapter.serving_args(&config))?;
     }
-    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
     let plan = adapter.run_plan(&config);
     writeln!(out, "engine: {}", config.engine).map_err(write_error)?;
     writeln!(out, "image: {}", config.image).map_err(write_error)?;
@@ -112,6 +115,7 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     }
 
     ensure_hf_token()?;
+    validate_serving_args(setup, &config)?;
     let status = Command::new(&command.program)
         .args(&command.args)
         .status()
@@ -134,6 +138,7 @@ fn run_benchmark(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> 
         return Ok(());
     }
     ensure_hf_token()?;
+    validate_serving_args(setup, &config)?;
     execute_run_plan(&plan, out)
 }
 
@@ -165,6 +170,30 @@ fn image_for(setup: &crate::cli::Setup) -> String {
         .image
         .clone()
         .unwrap_or_else(|| setup.engine.default_image().to_string())
+}
+
+fn validate_serving_args(setup: &crate::cli::Setup, config: &ServingConfig) -> Result<()> {
+    let adapter = adapter_for(setup.engine);
+    let schema = load_or_inspect(
+        adapter,
+        config.image.clone(),
+        Path::new(&setup.param_cache_dir),
+        setup.refresh_params,
+    )?;
+    let args = adapter.serving_args(config);
+    match schema.validate_args(&args) {
+        Ok(()) => Ok(()),
+        Err(err) if !setup.refresh_params => {
+            let schema = load_or_inspect(
+                adapter,
+                config.image.clone(),
+                Path::new(&setup.param_cache_dir),
+                true,
+            )?;
+            schema.validate_args(&args).map_err(|_| err)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 fn write_error(err: std::io::Error) -> String {

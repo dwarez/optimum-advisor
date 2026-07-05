@@ -3,9 +3,10 @@ use crate::config::ServingConfig;
 use crate::engine::{Engine, Metric};
 use crate::logs::Outcome;
 use crate::runner::{ProcessSpec, RunPlan};
+use crate::serve::EngineArg;
 use crate::trial::{next_tensor_parallelism, Candidate};
 
-use super::{append_extra_args, docker_server_args, readiness, EngineAdapter};
+use super::{append_engine_args, docker_server_args, readiness, EngineAdapter};
 
 pub(super) static SGLANG: SglangAdapter = SglangAdapter;
 
@@ -80,28 +81,37 @@ impl EngineAdapter for SglangAdapter {
         )
     }
 
+    fn serving_args(&self, config: &ServingConfig) -> Vec<EngineArg> {
+        let mut args = vec![
+            EngineArg::value("--model-path", config.model.clone()),
+            EngineArg::value("--host", "0.0.0.0"),
+            EngineArg::value("--port", "30000"),
+            EngineArg::value("--tp-size", config.candidate.parallelism.tensor.to_string()),
+            EngineArg::value(
+                "--mem-fraction-static",
+                format!("{:.2}", config.candidate.memory.fraction),
+            ),
+            EngineArg::value(
+                "--chunked-prefill-size",
+                config.candidate.scheduler.prefill_token_budget.to_string(),
+            ),
+            EngineArg::value(
+                "--max-running-requests",
+                config.candidate.scheduler.max_running_requests.to_string(),
+            ),
+        ];
+        args.extend(config.serve_args.clone());
+        args
+    }
+
     fn run_plan(&self, config: &ServingConfig) -> RunPlan {
         let mut server_args = docker_server_args(config, "30000");
         server_args.extend([
             "python3".to_string(),
             "-m".to_string(),
             "sglang.launch_server".to_string(),
-            "--model-path".to_string(),
-            config.model.clone(),
-            "--host".to_string(),
-            "0.0.0.0".to_string(),
-            "--port".to_string(),
-            "30000".to_string(),
-            "--tp-size".to_string(),
-            config.candidate.parallelism.tensor.to_string(),
-            "--mem-fraction-static".to_string(),
-            format!("{:.2}", config.candidate.memory.fraction),
-            "--chunked-prefill-size".to_string(),
-            config.candidate.scheduler.prefill_token_budget.to_string(),
-            "--max-running-requests".to_string(),
-            config.candidate.scheduler.max_running_requests.to_string(),
         ]);
-        append_extra_args(config, &mut server_args);
+        append_engine_args(&mut server_args, self.serving_args(config));
 
         RunPlan {
             server: ProcessSpec::new("docker", server_args),

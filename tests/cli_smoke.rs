@@ -85,6 +85,25 @@ fn run_dry_run_prints_server_and_benchmark_commands() {
 }
 
 #[test]
+fn direct_engine_flags_are_forwarded_to_the_server() {
+    let output = run(&[
+        "run",
+        "--engine",
+        "vllm",
+        "--model",
+        "m",
+        "--kv-cache-dtype",
+        "fp8",
+        "--disable-log-stats",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("--kv-cache-dtype fp8"));
+    assert!(text.contains("--disable-log-stats"));
+}
+
+#[test]
 fn run_execute_requires_hf_token() {
     let output = run_without_hf_token(&["run", "--engine", "vllm", "--model", "m", "--execute"]);
 
