@@ -68,6 +68,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
     let mode = match args.next().as_deref() {
         Some("plan") => Mode::Plan,
         Some("params") => Mode::Params,
+        Some("hardware") | Some("hw") => Mode::Hardware,
         Some("serve") => Mode::Serve,
         Some("bench") => Mode::Bench,
         Some("sweep") => Mode::Sweep,
@@ -236,7 +237,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
         }
     }
 
-    if setup.model.is_empty() && setup.mode != Mode::Params {
+    if setup.model.is_empty() && !matches!(setup.mode, Mode::Params | Mode::Hardware) {
         return Err("--model is required".to_string());
     }
     if setup.gpus == 0 {
@@ -279,6 +280,7 @@ fn usage() -> String {
     "usage:
   optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric tps|total_tps|req_s|ttft|p99_ttft|tpot|p99_tpot|itl|p99_itl|e2e|p99_e2e]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
+  optimum-advisor hardware
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
   optimum-advisor sweep --config PATH [--dry-run]
   optimum-advisor bench --config PATH [--dry-run]
@@ -365,6 +367,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(setup.engine, Engine::Sglang);
+    }
+
+    #[test]
+    fn hardware_does_not_require_model() {
+        let setup = parse_args(["hardware"].into_iter().map(String::from)).unwrap();
+        assert_eq!(setup.mode, Mode::Hardware);
     }
 
     #[test]

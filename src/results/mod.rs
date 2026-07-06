@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::ServingConfig;
 use crate::engine::{Engine, Metric};
+use crate::hardware::{format_hardware_profile, GpuInfo, HardwareProfile};
 use crate::serve::EngineArg;
 use crate::Result;
 
@@ -165,6 +166,7 @@ impl BenchmarkMetrics {
 pub struct TrialResult {
     pub config: ServingConfig,
     pub winning_metric: Metric,
+    pub hardware: HardwareProfile,
     pub metrics: BenchmarkMetrics,
     pub benchmark_stdout: String,
     pub benchmark_stderr: String,
@@ -174,6 +176,7 @@ impl TrialResult {
     pub fn new(
         config: ServingConfig,
         winning_metric: Metric,
+        hardware: HardwareProfile,
         benchmark_stdout: String,
         benchmark_stderr: String,
     ) -> Self {
@@ -181,6 +184,7 @@ impl TrialResult {
         Self {
             config,
             winning_metric,
+            hardware,
             metrics,
             benchmark_stdout,
             benchmark_stderr,
@@ -260,6 +264,15 @@ pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result
     Ok(ResultFiles { raw, summary })
 }
 
+pub fn write_hardware_profile(dir: impl AsRef<Path>, profile: &HardwareProfile) -> Result<PathBuf> {
+    let dir = dir.as_ref();
+    fs::create_dir_all(dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    let path = dir.join("hardware.txt");
+    fs::write(&path, format_hardware_profile(profile))
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    Ok(path)
+}
+
 pub fn write_best_config(dir: impl AsRef<Path>, text: &str) -> Result<PathBuf> {
     write_config_file(dir, "best.conf", text)
 }
@@ -291,10 +304,11 @@ fn first_number(text: &str) -> Option<f64> {
 
 fn raw_text(result: &TrialResult) -> String {
     format!(
-        "engine: {}\nmodel: {}\nwinning_metric: {}\n\n===== stdout =====\n{}\n===== stderr =====\n{}\n",
+        "engine: {}\nmodel: {}\nwinning_metric: {}\n\n===== hardware =====\n{}===== stdout =====\n{}\n===== stderr =====\n{}\n",
         result.config.engine,
         result.config.model,
         result.winning_metric,
+        format_hardware_profile(&result.hardware),
         result.benchmark_stdout,
         result.benchmark_stderr
     )
@@ -330,6 +344,29 @@ fn summary_tsv(result: &TrialResult, raw_path: &Path) -> String {
                 .max_running_requests
                 .to_string(),
         ),
+        (
+            "cuda_visible_devices",
+            result
+                .hardware
+                .cuda_visible_devices
+                .clone()
+                .unwrap_or_default(),
+        ),
+        ("gpu_count", result.hardware.gpus.len().to_string()),
+        ("gpu_names", join_gpu_names(&result.hardware.gpus)),
+        (
+            "gpu_compute_capabilities",
+            join_gpu_compute_capabilities(&result.hardware.gpus),
+        ),
+        (
+            "gpu_memory_total_mib",
+            sum_gpu_memory_total(&result.hardware.gpus).to_string(),
+        ),
+        (
+            "gpu_memory_free_mib",
+            sum_gpu_memory_free(&result.hardware.gpus).to_string(),
+        ),
+        ("hardware_warnings", result.hardware.warnings.join(";")),
         ("serve_args", format_engine_args(&result.config.serve_args)),
         (
             "successful_requests",
@@ -442,6 +479,28 @@ fn fmt_value(value: Option<f64>) -> String {
     value.map(|value| format!("{value:.4}")).unwrap_or_default()
 }
 
+fn join_gpu_names(gpus: &[GpuInfo]) -> String {
+    gpus.iter()
+        .map(|gpu| gpu.name.as_str())
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn join_gpu_compute_capabilities(gpus: &[GpuInfo]) -> String {
+    gpus.iter()
+        .map(|gpu| gpu.compute_capability.as_deref().unwrap_or("unknown"))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn sum_gpu_memory_total(gpus: &[GpuInfo]) -> u64 {
+    gpus.iter().map(|gpu| gpu.memory_total_mib).sum()
+}
+
+fn sum_gpu_memory_free(gpus: &[GpuInfo]) -> u64 {
+    gpus.iter().map(|gpu| gpu.memory_free_mib).sum()
+}
+
 fn format_engine_args(args: &[EngineArg]) -> String {
     args.iter()
         .map(|arg| match &arg.value {
@@ -508,6 +567,23 @@ mod tests {
             candidate: Candidate::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
+        }
+    }
+
+    fn hardware() -> HardwareProfile {
+        HardwareProfile {
+            source: "test".to_string(),
+            cuda_visible_devices: Some("0".to_string()),
+            gpus: vec![GpuInfo {
+                index: 0,
+                name: "NVIDIA L4".to_string(),
+                uuid: "GPU-abc".to_string(),
+                compute_capability: Some("8.9".to_string()),
+                memory_total_mib: 23034,
+                memory_free_mib: 22000,
+                memory_used_mib: 1034,
+            }],
+            warnings: Vec::new(),
         }
     }
 
@@ -615,12 +691,14 @@ Max ITL (ms):                            30.00",
         let slow = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
             "Output token throughput (tok/s): 1".to_string(),
             String::new(),
         );
         let fast = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
             "Output token throughput (tok/s): 2".to_string(),
             String::new(),
         );
@@ -633,12 +711,14 @@ Max ITL (ms):                            30.00",
         let high = TrialResult::new(
             config(),
             Metric::Ttft,
+            hardware(),
             "Mean TTFT (ms): 100".to_string(),
             String::new(),
         );
         let low = TrialResult::new(
             config(),
             Metric::Ttft,
+            hardware(),
             "Mean TTFT (ms): 50".to_string(),
             String::new(),
         );
@@ -651,12 +731,14 @@ Max ITL (ms):                            30.00",
         let high = TrialResult::new(
             config(),
             Metric::P99Tpot,
+            hardware(),
             "P99 TPOT (ms): 100".to_string(),
             String::new(),
         );
         let low = TrialResult::new(
             config(),
             Metric::P99Tpot,
+            hardware(),
             "P99 TPOT (ms): 50".to_string(),
             String::new(),
         );
@@ -672,6 +754,7 @@ Max ITL (ms):                            30.00",
         let result = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
             "Output token throughput (tok/s): 27.54".to_string(),
             String::new(),
         );
@@ -689,6 +772,27 @@ Max ITL (ms):                            30.00",
         assert!(summary.contains("27.5400"));
         assert!(summary.contains("p99_ttft_ms"));
         assert!(summary.contains("peak_output_token_throughput"));
+        assert!(summary.contains("gpu_count"));
+        assert!(summary.contains("NVIDIA L4"));
+        let raw = fs::read_to_string(files.raw).unwrap();
+        assert!(raw.contains("===== hardware ====="));
+        assert!(raw.contains("compute_capability=8.9"));
+    }
+
+    #[test]
+    fn writes_hardware_profile_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "optimum-advisor-hardware-test-{}",
+            std::process::id()
+        ));
+
+        fs::create_dir_all(&dir).unwrap();
+        let path = write_hardware_profile(&dir, &hardware()).unwrap();
+
+        assert_eq!(path.file_name().unwrap(), "hardware.txt");
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("gpus: 1"));
+        assert!(text.contains("memory_total_mib=23034"));
     }
 
     #[test]

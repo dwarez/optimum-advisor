@@ -6,11 +6,12 @@ use crate::cli::parse_args;
 use crate::config::ServingConfig;
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
+use crate::hardware::{detect_hardware, format_hardware_profile, summarize_hardware};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
-    create_run_dir, write_best_config, write_config_file, write_trial_result, ResultSet,
-    TrialResult,
+    create_run_dir, write_best_config, write_config_file,
+    write_hardware_profile as write_hardware_artifact, write_trial_result, ResultSet, TrialResult,
 };
 use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::serve::EngineArg;
@@ -22,11 +23,17 @@ pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()
     match setup.mode {
         Mode::Plan => print_plan(&setup, &mut out),
         Mode::Params => print_params(&setup, &mut out),
+        Mode::Hardware => print_hardware(&mut out),
         Mode::Serve => serve(&setup, &mut out),
         Mode::Bench => bench_once(&setup, &mut out),
         Mode::Sweep => run_sweep(&setup, &mut out),
         Mode::Advise => advise(&setup, &mut out),
     }
+}
+
+fn print_hardware(out: &mut impl Write) -> Result<()> {
+    let profile = detect_hardware();
+    write!(out, "{}", format_hardware_profile(&profile)).map_err(write_error)
 }
 
 fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
@@ -141,12 +148,15 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 
     ensure_hf_token()?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
+    let hardware = detect_hardware();
+    let hardware_file = write_hardware_artifact(&run_dir, &hardware)?;
     terminal::info(out, "bench", describe_config(adapter, &config))?;
+    terminal::info(out, "hardware", summarize_hardware(&hardware))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
     validate_serving_args(setup, &config)?;
     let plan = adapter.run_plan(&config);
     let output = execute_run_plan(&plan, &mut *out)?;
-    let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
+    let result = TrialResult::new(config, setup.metric, hardware, output.stdout, output.stderr);
     let files = write_trial_result(&run_dir, &result)?;
     let config_file = write_config_file(
         &run_dir,
@@ -163,6 +173,11 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             files.raw.display(),
             config_file.display()
         ),
+    )?;
+    terminal::info(
+        out,
+        "saved",
+        format!("hardware={}", hardware_file.display()),
     )?;
     Ok(())
 }
@@ -181,11 +196,14 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
     let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
+    let hardware = detect_hardware();
+    let hardware_file = write_hardware_artifact(&run_dir, &hardware)?;
     terminal::info(
         out,
         "sweep",
         format!("{total} trial(s), optimizing {}", setup.metric),
     )?;
+    terminal::info(out, "hardware", summarize_hardware(&hardware))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
 
     for (index, config) in configs.into_iter().enumerate() {
@@ -203,7 +221,13 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         validate_serving_args(setup, &config)?;
         let plan = adapter.run_plan(&config);
         let output = execute_run_plan(&plan, &mut *out)?;
-        let result = TrialResult::new(config, setup.metric, output.stdout, output.stderr);
+        let result = TrialResult::new(
+            config,
+            setup.metric,
+            hardware.clone(),
+            output.stdout,
+            output.stderr,
+        );
         let files = write_trial_result(&run_dir, &result)?;
         terminal::ok(out, "metrics", metrics_line(&result))?;
         terminal::info(
@@ -239,7 +263,11 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     terminal::info(
         out,
         "saved",
-        format!("best_config={}", best_config.display()),
+        format!(
+            "best_config={}, hardware={}",
+            best_config.display(),
+            hardware_file.display()
+        ),
     )?;
     Ok(())
 }
@@ -477,6 +505,7 @@ fn ensure_hf_token() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hardware::HardwareProfile;
 
     #[test]
     fn plan_writes_serve_and_bench_commands() {
@@ -515,6 +544,35 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("inspect: docker run"));
         assert!(text.contains("--entrypoint python3"));
+    }
+
+    #[test]
+    fn hardware_profile_prints_gpu_shape() {
+        let profile = HardwareProfile {
+            source: "nvidia-smi".to_string(),
+            cuda_visible_devices: Some("0,1".to_string()),
+            gpus: vec![crate::hardware::GpuInfo {
+                index: 0,
+                name: "NVIDIA L4".to_string(),
+                uuid: "GPU-abc".to_string(),
+                compute_capability: Some("8.9".to_string()),
+                memory_total_mib: 23034,
+                memory_free_mib: 22000,
+                memory_used_mib: 1034,
+            }],
+            warnings: vec!["test warning".to_string()],
+        };
+        let mut out = Vec::new();
+
+        write!(out, "{}", format_hardware_profile(&profile)).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("source: nvidia-smi"));
+        assert!(text.contains("cuda_visible_devices: 0,1"));
+        assert!(text.contains("gpus: 1"));
+        assert!(text.contains("compute_capability=8.9"));
+        assert!(text.contains("memory_total_mib=23034"));
+        assert!(text.contains("warning: test warning"));
     }
 
     #[test]

@@ -6,7 +6,7 @@ pub mod results;
 pub mod runtime;
 pub mod terminal;
 
-pub use domain::{config, engine, logs, trial};
+pub use domain::{config, engine, hardware, logs, trial};
 pub use engines::{params, serve};
 pub use runtime::runner;
 
