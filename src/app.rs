@@ -2,16 +2,16 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
+use crate::advisor::hardware::{detect_hardware, format_hardware_profile, summarize_hardware};
+use crate::advisor::model_memory::{estimate_model_memory, summarize_model_memory};
 use crate::cli::parse_args;
 use crate::config::ServingConfig;
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
-use crate::hardware::{detect_hardware, format_hardware_profile, summarize_hardware};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
-    create_run_dir, write_best_config, write_config_file,
-    write_hardware_profile as write_hardware_artifact, write_trial_result, ResultSet, TrialResult,
+    create_run_dir, write_best_config, write_config_file, write_report, ResultSet, TrialResult,
 };
 use crate::runner::{execute_run_plan, execute_server_plan};
 use crate::serve::EngineArg;
@@ -149,35 +149,48 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     ensure_hf_token()?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
     let hardware = detect_hardware();
-    let hardware_file = write_hardware_artifact(&run_dir, &hardware)?;
+    terminal::info(
+        out,
+        "model-mem",
+        format!(
+            "estimating model={} max_model_len={}",
+            config.model, config.max_model_len
+        ),
+    )?;
+    let model_memory = estimate_model_memory(&config);
     terminal::info(out, "bench", describe_config(adapter, &config))?;
     terminal::info(out, "hardware", summarize_hardware(&hardware))?;
+    terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
     validate_serving_args(setup, &config)?;
     let plan = adapter.run_plan(&config);
     let output = execute_run_plan(&plan, &mut *out)?;
-    let result = TrialResult::new(config, setup.metric, hardware, output.stdout, output.stderr);
-    let files = write_trial_result(&run_dir, &result)?;
+    let result = TrialResult::new(
+        config,
+        setup.metric,
+        hardware,
+        model_memory,
+        output.stdout,
+        output.stderr,
+    );
+    let mut results = ResultSet::new(setup.metric);
+    results.push(result);
+    let report_file = write_report(&run_dir, "bench", &results)?;
+    let best = results.best().ok_or("no benchmark results produced")?;
     let config_file = write_config_file(
         &run_dir,
         "config.conf",
-        &executable_config_text(setup, adapter, &result.config),
+        &executable_config_text(setup, adapter, &best.config),
     )?;
-    terminal::ok(out, "metrics", metrics_line(&result))?;
+    terminal::ok(out, "metrics", metrics_line(best))?;
     terminal::info(
         out,
         "saved",
         format!(
-            "summary={}, raw={}, config={}",
-            files.summary.display(),
-            files.raw.display(),
+            "report={}, config={}",
+            report_file.display(),
             config_file.display()
         ),
-    )?;
-    terminal::info(
-        out,
-        "saved",
-        format!("hardware={}", hardware_file.display()),
     )?;
     Ok(())
 }
@@ -197,13 +210,25 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let total = configs.len();
     let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
     let hardware = detect_hardware();
-    let hardware_file = write_hardware_artifact(&run_dir, &hardware)?;
+    let first_config = configs
+        .first()
+        .ok_or("sweep produced no candidate configs")?;
+    terminal::info(
+        out,
+        "model-mem",
+        format!(
+            "estimating model={} max_model_len={}",
+            first_config.model, first_config.max_model_len
+        ),
+    )?;
+    let model_memory = estimate_model_memory(first_config);
     terminal::info(
         out,
         "sweep",
         format!("{total} trial(s), optimizing {}", setup.metric),
     )?;
     terminal::info(out, "hardware", summarize_hardware(&hardware))?;
+    terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
 
     for (index, config) in configs.into_iter().enumerate() {
@@ -225,25 +250,17 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             config,
             setup.metric,
             hardware.clone(),
+            model_memory.clone(),
             output.stdout,
             output.stderr,
         );
-        let files = write_trial_result(&run_dir, &result)?;
         terminal::ok(out, "metrics", metrics_line(&result))?;
-        terminal::info(
-            out,
-            "saved",
-            format!(
-                "summary={}, raw={}",
-                files.summary.display(),
-                files.raw.display()
-            ),
-        )?;
         results.push(result);
     }
 
     results.sort_best_first();
     let best = results.best().ok_or("no benchmark results produced")?;
+    let report_file = write_report(&run_dir, "sweep", &results)?;
     let best_config = write_best_config(
         &run_dir,
         &executable_config_text(setup, adapter, &best.config),
@@ -264,9 +281,9 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         out,
         "saved",
         format!(
-            "best_config={}, hardware={}",
+            "report={}, best_config={}",
+            report_file.display(),
             best_config.display(),
-            hardware_file.display()
         ),
     )?;
     Ok(())
@@ -505,7 +522,7 @@ fn ensure_hf_token() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hardware::HardwareProfile;
+    use crate::advisor::hardware::HardwareProfile;
 
     #[test]
     fn plan_writes_serve_and_bench_commands() {
@@ -551,7 +568,7 @@ mod tests {
         let profile = HardwareProfile {
             source: "nvidia-smi".to_string(),
             cuda_visible_devices: Some("0,1".to_string()),
-            gpus: vec![crate::hardware::GpuInfo {
+            gpus: vec![crate::advisor::hardware::GpuInfo {
                 index: 0,
                 name: "NVIDIA L4".to_string(),
                 uuid: "GPU-abc".to_string(),
