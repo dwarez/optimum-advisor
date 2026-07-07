@@ -2,5 +2,9 @@
 name = "optimum-advisor"
 version = "0.1.0"
 edition = "2021"
+description = "Experimental CLI for benchmarking and advising LLM serving configurations."
+repository = "https://github.com/dwarez/optimum-advisor"
+readme = "README.md"
+publish = false
 
 [dependencies]

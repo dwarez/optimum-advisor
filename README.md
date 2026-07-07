@@ -1,166 +1,163 @@
 # Optimum Advisor
 
-> **Big warning:** this project is still super early and experimental. The API,
-> CLI, heuristics, cache format, and engine integrations are expected to change.
-> Treat it as a working prototype, not a production optimizer yet.
+> **Early experimental project.** The CLI, config format, search logic, and
+> engine integrations are still changing. Treat this as a prototype for
+> benchmarking serving setups, not a production optimizer.
 
-Optimum Advisor is a Rust CLI for exploring LLM serving configurations. Given a
-serving engine, model, hardware shape, target metric, and constraints, the tool
-is meant to run candidate serving configurations, benchmark them, and suggest
-better configurations.
+Optimum Advisor is a Rust CLI for testing LLM serving configurations. It starts
+serving-engine containers, runs engine-native benchmarks, records a structured
+report, and helps compare configurations by metrics such as throughput, TTFT,
+TPOT, ITL, and E2E latency.
 
-For now the focus is on vLLM and SGLang.
+Current engine focus: **vLLM** and **SGLang**.
 
-## Configuration
+## Install
 
-A configuration is the complete executable setup for one serving attempt. It is
-not just the serving engine flags.
-
-For now it contains:
-
-- engine name, such as `vllm` or `sglang`
-- container image
-- model id or model path
-- GPU count
-- `HF_TOKEN` from the environment for execution; the token is forwarded into
-  serving and benchmark containers without printing its value
-- max model length, defaulting to `8192` for now so long-context models do not
-  force huge KV-cache allocation during smoke runs
-- host, port, and startup timeout
-- detected hardware shape, currently NVIDIA GPU name, UUID, compute capability,
-  and memory totals from `nvidia-smi`
-- estimated model memory from `hf-mem`, including weights, KV cache, and total
-  bytes when `uvx hf-mem` or `hf-mem` is available
-- optimization metric, such as `tps`, `total_tps`, `req_s`, `ttft`,
-  `p99_ttft`, `tpot`, `p99_tpot`, `itl`, `p99_itl`, `e2e`, or `p99_e2e`
-- abstract candidate knobs: tensor/pipeline/data parallelism, memory fraction,
-  prefill token budget, and max running requests
-- extra engine-specific serving args from `--serve-arg` and `--serve-flag`
-- direct engine-specific flags, such as `--kv-cache-dtype fp8`; unknown
-  `--long-flags` are forwarded to the selected engine and validated against
-  the introspected schema when executing
-- benchmark settings: dataset name, number of prompts, request rate, and max
-  concurrency, plus random input/output lengths for synthetic benchmark data
-- result settings: winning metric from `--metric`; each execution writes a
-  subdirectory under `.optimum-advisor/results` unless `--results-dir` is set
-- engine-specific serving args from `[serve]`; sweep configs additionally use a
-  `[sweep]` section
-
-The engine adapter turns that configuration into concrete commands. For example,
-vLLM maps the abstract candidate to `--tensor-parallel-size`,
-`--gpu-memory-utilization`, `--max-model-len`, and
-`--max-num-batched-tokens`, then runs `vllm bench serve` from inside the same
-vLLM image. SGLang maps the same abstract candidate to `--tp-size`,
-`--mem-fraction-static`, `--chunked-prefill-size`, and
-`--max-running-requests`, then runs `python3 -m sglang.bench_serving` from
-inside the same SGLang image.
-
-## What Exists
-
-- Rust CLI backbone with `plan`, `params`, `serve`, debug `hardware`, `bench`,
-  `sweep`, and `advise` modes.
-- First-class executable serving configuration in code.
-- Engine-specific adapter folders for vLLM and SGLang under `src/engines/`.
-- Advisor input probes under `src/advisor/`, currently hardware detection and
-  model memory estimation.
-- Abstract candidate configuration for parallelism, memory budget, and scheduler
-  budget, rendered into engine-specific serving flags.
-- Full configs through `--config`: `bench` consumes one exact config, while
-  `sweep` consumes configs with engine-specific serving-parameter sweeps.
-- Runtime parameter introspection from the selected container image.
-- Cached parameter schemas under `.optimum-advisor/params`.
-- Basic validation for extra serving args against the introspected schema.
-- Docker command construction for serving containers, including GPU passthrough.
-- Hardware detection through `nvidia-smi`, captured in `bench` and `sweep`
-  artifacts; `hardware` is kept as a debug inspection command.
-- Model memory estimation through `hf-mem`, captured in the unified
-  `report.json`. Missing `hf-mem` is recorded as a warning, not treated as a
-  benchmark failure.
-- Serving containers are named/labeled per CLI process and cleaned up after
-  `serve --execute`, `bench`, or `sweep` finish.
-- vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
-  image.
-- SGLang benchmark invocation through `python3 -m sglang.bench_serving`
-  inside the selected SGLang image.
-- Benchmark result capture in one structured `report.json` per execution,
-  including detected hardware, model memory estimates, raw benchmark output,
-  configs, and metrics. `config.conf` / `best.conf` are runnable convenience
-  files, not the source of truth.
-- Initial log classification for OOM and KV-cache pressure.
-- A small sync helper for sending the repo to the GPU machine:
-  `scripts/sync-to-gpu.sh`.
-- Unit and smoke tests for the current atomic behavior.
-
-## Quick Checks
-
-Local checks that do not need a GPU:
+Local install from this checkout:
 
 ```bash
-cargo test
-cargo run -- plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --max-model-len 8192 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1
+./scripts/install.sh
+```
+
+Equivalent raw command:
+
+```bash
+cargo install --path . --locked --force
+```
+
+Install from git:
+
+```bash
+cargo install --git https://github.com/dwarez/optimum-advisor.git --locked --force
+```
+
+Uninstall:
+
+```bash
+cargo uninstall optimum-advisor
+```
+
+## Requirements
+
+- Rust toolchain with `cargo`
+- Docker
+- NVIDIA runtime for GPU execution (`docker run --gpus ...`)
+- `HF_TOKEN` for benchmark execution
+- Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
+
+## Quick Start
+
+Dry-run a single benchmark command:
+
+```bash
 cargo run -- bench --config examples/bench.conf --dry-run
-cargo run -- bench --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8 --dry-run
-cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --dry-run
-cargo run -- sweep --config examples/sweep.conf --dry-run
 ```
 
-Debug hardware inspection:
+Run a sweep on a GPU host:
 
 ```bash
-cargo run -- hardware
+export HF_TOKEN=hf_...
+optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
+optimum-advisor sweep --config examples/sweep.conf
 ```
 
-`bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
-pair per candidate.
+Inspect the result:
 
-Config files can replace the CLI args. A single-benchmark config has `[serve]` and no
-`[sweep]`; a sweep config adds `[sweep]`. Values in `[sweep]` are real engine
-serving parameters and are validated against the selected engine image when
-executing:
+```bash
+cat .optimum-advisor/results/<sweep-dir>/report.json
+optimum-advisor bench --config .optimum-advisor/results/<sweep-dir>/best.conf
+```
+
+## Config Files
+
+Use config files for real runs. CLI flags are useful for quick checks, but
+config files are easier to repeat and commit.
+
+Single benchmark configs use `[serve]`:
 
 ```text
 engine = vllm
 model = Qwen/Qwen3-4B-Instruct-2507
-gpus = 2
+gpus = 1
+max_model_len = 8192
 metric = tps
 
 [benchmark]
 num_prompts = 4
 request_rate = 1
+max_concurrency = 1
+
+[serve]
+gpu-memory-utilization = 0.90
+max-num-batched-tokens = 8192
+```
+
+Sweep configs add `[sweep]`. Values in `[sweep]` are real engine serving
+parameters and are validated against the selected engine image at execution
+time.
+
+```text
+engine = vllm
+model = Qwen/Qwen3-4B-Instruct-2507
+gpus = 2
+max_model_len = 8192
+metric = tps
+
+[benchmark]
+num_prompts = 4
+request_rate = 1
+max_concurrency = 1
 
 [sweep]
 tensor-parallel-size = 1,2
 gpu-memory-utilization = 0.80,0.90
+max-num-batched-tokens = 4096,8192
 ```
 
-GPU smoke benchmark:
+## Commands
 
 ```bash
-export HF_TOKEN=hf_...
-# Optional but recommended for model-memory data in report.json:
-# curl -LsSf https://astral.sh/uv/install.sh | sh
-cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
-cargo run -- sweep --config examples/sweep.conf
-cat .optimum-advisor/results/<sweep-dir>/report.json
-cargo run -- bench --config .optimum-advisor/results/<sweep-dir>/best.conf
-cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
+optimum-advisor plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507
+optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute
+optimum-advisor bench --config examples/bench.conf
+optimum-advisor sweep --config examples/sweep.conf
+optimum-advisor hardware
 ```
 
-## Missing / TODO
+`bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
+pair per candidate without starting containers.
 
-- Make SGLang parameter introspection as robust as vLLM's argparse-based path.
-- Expand structured benchmark metrics and engine-specific parsers beyond the
-  current common throughput/latency summary fields.
-- Persist trials, outcomes, configs, and metrics in a real execution history.
-- Make candidate search failure-tolerant so OOM/bad candidates are recorded and
-  skipped instead of aborting the whole sweep.
-- Improve engine-specific heuristics for OOM, KV pressure, batching, tensor
-  parallelism, pipeline parallelism, and memory utilization.
-- Add hardware/model discovery instead of requiring most setup details manually.
-- Use model memory estimates and detected hardware memory in advisor/tuner
-  heuristics.
-- Add constraints to the optimizer, such as latency ceilings or minimum
-  throughput.
-- Expand Docker lifecycle handling with better logs, volumes, automatic port
-  selection, and CUDA-host integration coverage.
-- Expand integration tests on an actual CUDA host.
+## Results
+
+Each execution writes a directory under `.optimum-advisor/results` unless
+`--results-dir` is set.
+
+Main artifact:
+
+- `report.json`: source of truth with hardware, model-memory estimate, tested
+  configs, benchmark metrics, stdout, stderr, winning metric, and best trial
+
+Convenience artifacts:
+
+- `config.conf`: runnable config produced by `bench`
+- `best.conf`: runnable best config produced by `sweep`
+
+## Current Scope
+
+Implemented:
+
+- vLLM serving and `vllm bench serve`
+- SGLang serving and `sglang.bench_serving`
+- runtime serving-parameter introspection from container images
+- Docker lifecycle cleanup for owned server containers
+- hardware detection through `nvidia-smi`
+- optional model-memory estimation through `hf-mem`
+- structured benchmark reports and basic best-result selection
+
+Still missing:
+
+- failure-tolerant sweeps that record bad/OOM candidates instead of aborting
+- advisor heuristics using hardware and model-memory budgets
+- richer constraints such as latency ceilings and minimum throughput
+- stronger SGLang parameter introspection
+- broader CUDA-host integration coverage
