@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::advisor::hardware::{GpuInfo, HardwareProfile};
+use crate::advisor::model_memory::ModelMemoryEstimate;
 use crate::config::ServingConfig;
 use crate::engine::{Engine, Metric};
 use crate::serve::EngineArg;
@@ -165,6 +167,8 @@ impl BenchmarkMetrics {
 pub struct TrialResult {
     pub config: ServingConfig,
     pub winning_metric: Metric,
+    pub hardware: HardwareProfile,
+    pub model_memory: ModelMemoryEstimate,
     pub metrics: BenchmarkMetrics,
     pub benchmark_stdout: String,
     pub benchmark_stderr: String,
@@ -174,6 +178,8 @@ impl TrialResult {
     pub fn new(
         config: ServingConfig,
         winning_metric: Metric,
+        hardware: HardwareProfile,
+        model_memory: ModelMemoryEstimate,
         benchmark_stdout: String,
         benchmark_stderr: String,
     ) -> Self {
@@ -181,6 +187,8 @@ impl TrialResult {
         Self {
             config,
             winning_metric,
+            hardware,
+            model_memory,
             metrics,
             benchmark_stdout,
             benchmark_stderr,
@@ -221,12 +229,6 @@ impl ResultSet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResultFiles {
-    pub raw: PathBuf,
-    pub summary: PathBuf,
-}
-
 pub fn create_run_dir(root: impl AsRef<Path>, kind: &str, engine: Engine) -> Result<PathBuf> {
     let root = root.as_ref();
     let dir = root.join(format!(
@@ -239,25 +241,13 @@ pub fn create_run_dir(root: impl AsRef<Path>, kind: &str, engine: Engine) -> Res
     Ok(dir)
 }
 
-pub fn write_trial_result(dir: impl AsRef<Path>, result: &TrialResult) -> Result<ResultFiles> {
+pub fn write_report(dir: impl AsRef<Path>, kind: &str, results: &ResultSet) -> Result<PathBuf> {
     let dir = dir.as_ref();
     fs::create_dir_all(dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
-
-    let stem = format!(
-        "trial-{}-{}-{}",
-        now_nanos()?,
-        result.config.engine,
-        std::process::id()
-    );
-    let raw = dir.join(format!("{stem}.raw.txt"));
-    let summary = dir.join(format!("{stem}.tsv"));
-
-    fs::write(&raw, raw_text(result))
-        .map_err(|err| format!("failed to write {}: {err}", raw.display()))?;
-    fs::write(&summary, summary_tsv(result, &raw))
-        .map_err(|err| format!("failed to write {}: {err}", summary.display()))?;
-
-    Ok(ResultFiles { raw, summary })
+    let path = dir.join("report.json");
+    fs::write(&path, report_json(kind, results))
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    Ok(path)
 }
 
 pub fn write_best_config(dir: impl AsRef<Path>, text: &str) -> Result<PathBuf> {
@@ -289,167 +279,341 @@ fn first_number(text: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn raw_text(result: &TrialResult) -> String {
-    format!(
-        "engine: {}\nmodel: {}\nwinning_metric: {}\n\n===== stdout =====\n{}\n===== stderr =====\n{}\n",
-        result.config.engine,
-        result.config.model,
-        result.winning_metric,
-        result.benchmark_stdout,
-        result.benchmark_stderr
-    )
+fn report_json(kind: &str, results: &ResultSet) -> String {
+    let best = results.best();
+    let trials = results
+        .trials
+        .iter()
+        .enumerate()
+        .map(|(index, trial)| trial_json(index, trial))
+        .collect::<Vec<_>>();
+    let mut fields = vec![
+        ("schema_version", "1".to_string()),
+        ("kind", json_string(kind)),
+        (
+            "winning_metric",
+            json_string(&results.winning_metric.to_string()),
+        ),
+        (
+            "best_trial_index",
+            best.map(|_| "0".to_string())
+                .unwrap_or_else(|| "null".to_string()),
+        ),
+        (
+            "best_winning_value",
+            best.and_then(TrialResult::winning_value)
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+        ),
+    ];
+    if let Some(best) = best {
+        fields.push(("hardware", hardware_json(&best.hardware)));
+        fields.push(("model_memory", model_memory_json(&best.model_memory)));
+    }
+    fields.push(("trials", array(trials)));
+    format!("{}\n", object(fields))
 }
 
-fn summary_tsv(result: &TrialResult, raw_path: &Path) -> String {
-    let metrics = &result.metrics;
-    let columns = vec![
-        ("engine", result.config.engine.to_string()),
-        ("model", result.config.model.clone()),
-        ("winning_metric", result.winning_metric.to_string()),
-        ("winning_value", fmt_value(result.winning_value())),
-        ("tp", result.config.candidate.parallelism.tensor.to_string()),
+fn trial_json(index: usize, result: &TrialResult) -> String {
+    object(vec![
+        ("index", index.to_string()),
         (
-            "memory_fraction",
-            format!("{:.2}", result.config.candidate.memory.fraction),
+            "winning_metric",
+            json_string(&result.winning_metric.to_string()),
+        ),
+        ("winning_value", opt_f64(result.winning_value())),
+        ("config", config_json(&result.config)),
+        ("metrics", metrics_json(&result.metrics)),
+        (
+            "logs",
+            object(vec![
+                ("benchmark_stdout", json_string(&result.benchmark_stdout)),
+                ("benchmark_stderr", json_string(&result.benchmark_stderr)),
+            ]),
+        ),
+    ])
+}
+
+fn config_json(config: &ServingConfig) -> String {
+    object(vec![
+        ("engine", json_string(&config.engine.to_string())),
+        ("image", json_string(&config.image)),
+        ("model", json_string(&config.model)),
+        ("gpus", config.gpus.to_string()),
+        ("host", json_string(&config.host)),
+        ("port", config.port.to_string()),
+        (
+            "startup_timeout_secs",
+            config.startup_timeout_secs.to_string(),
+        ),
+        ("max_model_len", config.max_model_len.to_string()),
+        ("metric", json_string(&config.metric.to_string())),
+        (
+            "candidate",
+            object(vec![
+                (
+                    "parallelism",
+                    object(vec![
+                        ("tensor", config.candidate.parallelism.tensor.to_string()),
+                        (
+                            "pipeline",
+                            config.candidate.parallelism.pipeline.to_string(),
+                        ),
+                        ("data", config.candidate.parallelism.data.to_string()),
+                    ]),
+                ),
+                (
+                    "memory",
+                    object(vec![(
+                        "fraction",
+                        config.candidate.memory.fraction.to_string(),
+                    )]),
+                ),
+                (
+                    "scheduler",
+                    object(vec![
+                        (
+                            "prefill_token_budget",
+                            config.candidate.scheduler.prefill_token_budget.to_string(),
+                        ),
+                        (
+                            "max_running_requests",
+                            config.candidate.scheduler.max_running_requests.to_string(),
+                        ),
+                    ]),
+                ),
+            ]),
+        ),
+        ("serve_args", engine_args_json(&config.serve_args)),
+        (
+            "benchmark",
+            object(vec![
+                ("dataset_name", json_string(&config.benchmark.dataset_name)),
+                ("num_prompts", config.benchmark.num_prompts.to_string()),
+                ("request_rate", json_string(&config.benchmark.request_rate)),
+                (
+                    "max_concurrency",
+                    config
+                        .benchmark
+                        .max_concurrency
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| "null".to_string()),
+                ),
+                (
+                    "random_input_len",
+                    config.benchmark.random_input_len.to_string(),
+                ),
+                (
+                    "random_output_len",
+                    config.benchmark.random_output_len.to_string(),
+                ),
+            ]),
+        ),
+    ])
+}
+
+fn hardware_json(profile: &HardwareProfile) -> String {
+    object(vec![
+        ("source", json_string(&profile.source)),
+        (
+            "cuda_visible_devices",
+            opt_string(profile.cuda_visible_devices.as_deref()),
         ),
         (
-            "prefill_token_budget",
-            result
-                .config
-                .candidate
-                .scheduler
-                .prefill_token_budget
-                .to_string(),
+            "gpus",
+            array(profile.gpus.iter().map(gpu_json).collect::<Vec<_>>()),
         ),
+        ("warnings", string_array(&profile.warnings)),
+    ])
+}
+
+fn gpu_json(gpu: &GpuInfo) -> String {
+    object(vec![
+        ("index", gpu.index.to_string()),
+        ("name", json_string(&gpu.name)),
+        ("uuid", json_string(&gpu.uuid)),
         (
-            "max_running_requests",
-            result
-                .config
-                .candidate
-                .scheduler
-                .max_running_requests
-                .to_string(),
+            "compute_capability",
+            opt_string(gpu.compute_capability.as_deref()),
         ),
-        ("serve_args", format_engine_args(&result.config.serve_args)),
-        (
-            "successful_requests",
-            fmt_value(metrics.successful_requests),
-        ),
-        ("failed_requests", fmt_value(metrics.failed_requests)),
+        ("memory_total_mib", gpu.memory_total_mib.to_string()),
+        ("memory_free_mib", gpu.memory_free_mib.to_string()),
+        ("memory_used_mib", gpu.memory_used_mib.to_string()),
+    ])
+}
+
+fn model_memory_json(estimate: &ModelMemoryEstimate) -> String {
+    object(vec![
+        ("source", json_string(&estimate.source)),
+        ("model", json_string(&estimate.model)),
+        ("max_model_len", estimate.max_model_len.to_string()),
+        ("batch_size", estimate.batch_size.to_string()),
+        ("kv_cache_dtype", json_string(&estimate.kv_cache_dtype)),
+        ("weights_bytes", opt_u64(estimate.weights_bytes)),
+        ("kv_cache_bytes", opt_u64(estimate.kv_cache_bytes)),
+        ("total_bytes", opt_u64(estimate.total_bytes)),
+        ("raw_stdout", json_string(&estimate.raw_stdout)),
+        ("raw_stderr", json_string(&estimate.raw_stderr)),
+        ("warnings", string_array(&estimate.warnings)),
+    ])
+}
+
+fn metrics_json(metrics: &BenchmarkMetrics) -> String {
+    object(vec![
+        ("successful_requests", opt_f64(metrics.successful_requests)),
+        ("failed_requests", opt_f64(metrics.failed_requests)),
         (
             "max_request_concurrency",
-            fmt_value(metrics.max_request_concurrency),
+            opt_f64(metrics.max_request_concurrency),
         ),
         (
             "request_rate_configured",
-            fmt_value(metrics.request_rate_configured),
+            opt_f64(metrics.request_rate_configured),
         ),
         (
             "benchmark_duration_s",
-            fmt_value(metrics.benchmark_duration_s),
+            opt_f64(metrics.benchmark_duration_s),
         ),
-        ("total_input_tokens", fmt_value(metrics.total_input_tokens)),
+        ("total_input_tokens", opt_f64(metrics.total_input_tokens)),
         (
             "total_input_text_tokens",
-            fmt_value(metrics.total_input_text_tokens),
+            opt_f64(metrics.total_input_text_tokens),
         ),
         (
             "total_input_vision_tokens",
-            fmt_value(metrics.total_input_vision_tokens),
+            opt_f64(metrics.total_input_vision_tokens),
         ),
         (
             "total_generated_tokens",
-            fmt_value(metrics.total_generated_tokens),
+            opt_f64(metrics.total_generated_tokens),
         ),
         (
             "total_generated_tokens_retokenized",
-            fmt_value(metrics.total_generated_tokens_retokenized),
+            opt_f64(metrics.total_generated_tokens_retokenized),
         ),
-        ("request_throughput", fmt_value(metrics.request_throughput)),
-        ("request_goodput", fmt_value(metrics.request_goodput)),
+        ("request_throughput", opt_f64(metrics.request_throughput)),
+        ("request_goodput", opt_f64(metrics.request_goodput)),
         (
             "input_token_throughput",
-            fmt_value(metrics.input_token_throughput),
+            opt_f64(metrics.input_token_throughput),
         ),
         (
             "output_token_throughput",
-            fmt_value(metrics.output_token_throughput),
+            opt_f64(metrics.output_token_throughput),
         ),
         (
             "output_token_throughput_retokenized",
-            fmt_value(metrics.output_token_throughput_retokenized),
+            opt_f64(metrics.output_token_throughput_retokenized),
         ),
         (
             "peak_output_token_throughput",
-            fmt_value(metrics.peak_output_token_throughput),
+            opt_f64(metrics.peak_output_token_throughput),
         ),
         (
             "peak_concurrent_requests",
-            fmt_value(metrics.peak_concurrent_requests),
+            opt_f64(metrics.peak_concurrent_requests),
         ),
         (
             "total_token_throughput",
-            fmt_value(metrics.total_token_throughput),
+            opt_f64(metrics.total_token_throughput),
         ),
         (
             "total_token_throughput_retokenized",
-            fmt_value(metrics.total_token_throughput_retokenized),
+            opt_f64(metrics.total_token_throughput_retokenized),
         ),
-        ("concurrency", fmt_value(metrics.concurrency)),
-        ("accept_length", fmt_value(metrics.accept_length)),
-        ("rtfx", fmt_value(metrics.rtfx)),
-        ("mean_ttft_ms", fmt_value(metrics.mean_ttft_ms)),
-        ("median_ttft_ms", fmt_value(metrics.median_ttft_ms)),
-        ("std_ttft_ms", fmt_value(metrics.std_ttft_ms)),
-        ("p90_ttft_ms", fmt_value(metrics.p90_ttft_ms)),
-        ("p95_ttft_ms", fmt_value(metrics.p95_ttft_ms)),
-        ("p99_ttft_ms", fmt_value(metrics.p99_ttft_ms)),
-        ("mean_tpot_ms", fmt_value(metrics.mean_tpot_ms)),
-        ("median_tpot_ms", fmt_value(metrics.median_tpot_ms)),
-        ("std_tpot_ms", fmt_value(metrics.std_tpot_ms)),
-        ("p90_tpot_ms", fmt_value(metrics.p90_tpot_ms)),
-        ("p95_tpot_ms", fmt_value(metrics.p95_tpot_ms)),
-        ("p99_tpot_ms", fmt_value(metrics.p99_tpot_ms)),
-        ("mean_itl_ms", fmt_value(metrics.mean_itl_ms)),
-        ("median_itl_ms", fmt_value(metrics.median_itl_ms)),
-        ("std_itl_ms", fmt_value(metrics.std_itl_ms)),
-        ("p90_itl_ms", fmt_value(metrics.p90_itl_ms)),
-        ("p95_itl_ms", fmt_value(metrics.p95_itl_ms)),
-        ("p99_itl_ms", fmt_value(metrics.p99_itl_ms)),
-        ("max_itl_ms", fmt_value(metrics.max_itl_ms)),
-        ("mean_e2e_ms", fmt_value(metrics.mean_e2e_ms)),
-        ("median_e2e_ms", fmt_value(metrics.median_e2e_ms)),
-        ("std_e2e_ms", fmt_value(metrics.std_e2e_ms)),
-        ("p90_e2e_ms", fmt_value(metrics.p90_e2e_ms)),
-        ("p95_e2e_ms", fmt_value(metrics.p95_e2e_ms)),
-        ("p99_e2e_ms", fmt_value(metrics.p99_e2e_ms)),
-        ("raw_file", raw_path.display().to_string()),
-    ];
-    let header = columns
-        .iter()
-        .map(|(name, _)| *name)
-        .collect::<Vec<_>>()
-        .join("\t");
-    let row = columns
+        ("concurrency", opt_f64(metrics.concurrency)),
+        ("accept_length", opt_f64(metrics.accept_length)),
+        ("rtfx", opt_f64(metrics.rtfx)),
+        ("mean_ttft_ms", opt_f64(metrics.mean_ttft_ms)),
+        ("median_ttft_ms", opt_f64(metrics.median_ttft_ms)),
+        ("std_ttft_ms", opt_f64(metrics.std_ttft_ms)),
+        ("p90_ttft_ms", opt_f64(metrics.p90_ttft_ms)),
+        ("p95_ttft_ms", opt_f64(metrics.p95_ttft_ms)),
+        ("p99_ttft_ms", opt_f64(metrics.p99_ttft_ms)),
+        ("mean_tpot_ms", opt_f64(metrics.mean_tpot_ms)),
+        ("median_tpot_ms", opt_f64(metrics.median_tpot_ms)),
+        ("std_tpot_ms", opt_f64(metrics.std_tpot_ms)),
+        ("p90_tpot_ms", opt_f64(metrics.p90_tpot_ms)),
+        ("p95_tpot_ms", opt_f64(metrics.p95_tpot_ms)),
+        ("p99_tpot_ms", opt_f64(metrics.p99_tpot_ms)),
+        ("mean_itl_ms", opt_f64(metrics.mean_itl_ms)),
+        ("median_itl_ms", opt_f64(metrics.median_itl_ms)),
+        ("std_itl_ms", opt_f64(metrics.std_itl_ms)),
+        ("p90_itl_ms", opt_f64(metrics.p90_itl_ms)),
+        ("p95_itl_ms", opt_f64(metrics.p95_itl_ms)),
+        ("p99_itl_ms", opt_f64(metrics.p99_itl_ms)),
+        ("max_itl_ms", opt_f64(metrics.max_itl_ms)),
+        ("mean_e2e_ms", opt_f64(metrics.mean_e2e_ms)),
+        ("median_e2e_ms", opt_f64(metrics.median_e2e_ms)),
+        ("std_e2e_ms", opt_f64(metrics.std_e2e_ms)),
+        ("p90_e2e_ms", opt_f64(metrics.p90_e2e_ms)),
+        ("p95_e2e_ms", opt_f64(metrics.p95_e2e_ms)),
+        ("p99_e2e_ms", opt_f64(metrics.p99_e2e_ms)),
+    ])
+}
+
+fn engine_args_json(args: &[EngineArg]) -> String {
+    array(
+        args.iter()
+            .map(|arg| {
+                object(vec![
+                    ("name", json_string(&arg.name)),
+                    ("value", opt_string(arg.value.as_deref())),
+                ])
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn object(fields: Vec<(&str, String)>) -> String {
+    let body = fields
         .into_iter()
-        .map(|(_, value)| value)
+        .map(|(name, value)| format!("{}:{value}", json_string(name)))
         .collect::<Vec<_>>()
-        .join("\t");
-    format!("{header}\n{row}\n")
+        .join(",");
+    format!("{{{body}}}")
 }
 
-fn fmt_value(value: Option<f64>) -> String {
-    value.map(|value| format!("{value:.4}")).unwrap_or_default()
+fn array(items: Vec<String>) -> String {
+    format!("[{}]", items.join(","))
 }
 
-fn format_engine_args(args: &[EngineArg]) -> String {
-    args.iter()
-        .map(|arg| match &arg.value {
-            Some(value) => format!("{}={value}", arg.name),
-            None => arg.name.clone(),
-        })
-        .collect::<Vec<_>>()
-        .join(";")
+fn string_array(items: &[String]) -> String {
+    array(items.iter().map(|item| json_string(item)).collect())
+}
+
+fn opt_string(value: Option<&str>) -> String {
+    value.map(json_string).unwrap_or_else(|| "null".to_string())
+}
+
+fn opt_u64(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn opt_f64(value: Option<f64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn now_nanos() -> Result<u128> {
@@ -508,6 +672,39 @@ mod tests {
             candidate: Candidate::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
+        }
+    }
+
+    fn hardware() -> HardwareProfile {
+        HardwareProfile {
+            source: "test".to_string(),
+            cuda_visible_devices: Some("0".to_string()),
+            gpus: vec![GpuInfo {
+                index: 0,
+                name: "NVIDIA L4".to_string(),
+                uuid: "GPU-abc".to_string(),
+                compute_capability: Some("8.9".to_string()),
+                memory_total_mib: 23034,
+                memory_free_mib: 22000,
+                memory_used_mib: 1034,
+            }],
+            warnings: Vec::new(),
+        }
+    }
+
+    fn model_memory() -> ModelMemoryEstimate {
+        ModelMemoryEstimate {
+            source: "test".to_string(),
+            model: "m".to_string(),
+            max_model_len: 8192,
+            batch_size: 1,
+            kv_cache_dtype: "auto".to_string(),
+            weights_bytes: Some(10),
+            kv_cache_bytes: Some(20),
+            total_bytes: Some(30),
+            raw_stdout: String::new(),
+            raw_stderr: String::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -615,12 +812,16 @@ Max ITL (ms):                            30.00",
         let slow = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
+            model_memory(),
             "Output token throughput (tok/s): 1".to_string(),
             String::new(),
         );
         let fast = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
+            model_memory(),
             "Output token throughput (tok/s): 2".to_string(),
             String::new(),
         );
@@ -633,12 +834,16 @@ Max ITL (ms):                            30.00",
         let high = TrialResult::new(
             config(),
             Metric::Ttft,
+            hardware(),
+            model_memory(),
             "Mean TTFT (ms): 100".to_string(),
             String::new(),
         );
         let low = TrialResult::new(
             config(),
             Metric::Ttft,
+            hardware(),
+            model_memory(),
             "Mean TTFT (ms): 50".to_string(),
             String::new(),
         );
@@ -651,12 +856,16 @@ Max ITL (ms):                            30.00",
         let high = TrialResult::new(
             config(),
             Metric::P99Tpot,
+            hardware(),
+            model_memory(),
             "P99 TPOT (ms): 100".to_string(),
             String::new(),
         );
         let low = TrialResult::new(
             config(),
             Metric::P99Tpot,
+            hardware(),
+            model_memory(),
             "P99 TPOT (ms): 50".to_string(),
             String::new(),
         );
@@ -668,27 +877,35 @@ Max ITL (ms):                            30.00",
     }
 
     #[test]
-    fn writes_raw_and_summary_files() {
+    fn writes_unified_report_file() {
         let result = TrialResult::new(
             config(),
             Metric::Tps,
+            hardware(),
+            model_memory(),
             "Output token throughput (tok/s): 27.54".to_string(),
-            String::new(),
+            "stderr\nline".to_string(),
         );
+        let mut results = ResultSet::new(Metric::Tps);
+        results.push(result);
         let dir = std::env::temp_dir().join(format!(
             "optimum-advisor-results-test-{}",
             std::process::id()
         ));
 
-        let files = write_trial_result(&dir, &result).unwrap();
+        let report = write_report(&dir, "bench", &results).unwrap();
 
-        assert!(files.raw.exists());
-        assert!(files.summary.exists());
-        let summary = fs::read_to_string(files.summary).unwrap();
-        assert!(summary.contains("winning_metric"));
-        assert!(summary.contains("27.5400"));
-        assert!(summary.contains("p99_ttft_ms"));
-        assert!(summary.contains("peak_output_token_throughput"));
+        assert_eq!(report.file_name().unwrap(), "report.json");
+        let text = fs::read_to_string(report).unwrap();
+        assert!(text.contains("\"kind\":\"bench\""));
+        assert!(text.contains("\"winning_metric\":\"tps\""));
+        assert!(text.contains("\"best_winning_value\":27.54"));
+        assert!(text.contains("\"hardware\""));
+        assert!(text.contains("\"compute_capability\":\"8.9\""));
+        assert!(text.contains("\"model_memory\""));
+        assert!(text.contains("\"total_bytes\":30"));
+        assert!(text.contains("\"benchmark_stderr\":\"stderr\\nline\""));
+        assert!(text.contains("\"model\":\"m\""));
     }
 
     #[test]

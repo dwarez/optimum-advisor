@@ -123,6 +123,7 @@ impl fmt::Display for Metric {
 pub enum Mode {
     Plan,
     Params,
+    Hardware,
     Serve,
     Bench,
     Sweep,

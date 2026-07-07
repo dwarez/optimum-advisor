@@ -27,6 +27,10 @@ For now it contains:
 - max model length, defaulting to `8192` for now so long-context models do not
   force huge KV-cache allocation during smoke runs
 - host, port, and startup timeout
+- detected hardware shape, currently NVIDIA GPU name, UUID, compute capability,
+  and memory totals from `nvidia-smi`
+- estimated model memory from `hf-mem`, including weights, KV cache, and total
+  bytes when `uvx hf-mem` or `hf-mem` is available
 - optimization metric, such as `tps`, `total_tps`, `req_s`, `ttft`,
   `p99_ttft`, `tpot`, `p99_tpot`, `itl`, `p99_itl`, `e2e`, or `p99_e2e`
 - abstract candidate knobs: tensor/pipeline/data parallelism, memory fraction,
@@ -53,10 +57,12 @@ inside the same SGLang image.
 
 ## What Exists
 
-- Rust CLI backbone with `plan`, `params`, `serve`, `bench`, `sweep`, and
-  `advise` modes.
+- Rust CLI backbone with `plan`, `params`, `serve`, debug `hardware`, `bench`,
+  `sweep`, and `advise` modes.
 - First-class executable serving configuration in code.
 - Engine-specific adapter folders for vLLM and SGLang under `src/engines/`.
+- Advisor input probes under `src/advisor/`, currently hardware detection and
+  model memory estimation.
 - Abstract candidate configuration for parallelism, memory budget, and scheduler
   budget, rendered into engine-specific serving flags.
 - Full configs through `--config`: `bench` consumes one exact config, while
@@ -65,14 +71,21 @@ inside the same SGLang image.
 - Cached parameter schemas under `.optimum-advisor/params`.
 - Basic validation for extra serving args against the introspected schema.
 - Docker command construction for serving containers, including GPU passthrough.
+- Hardware detection through `nvidia-smi`, captured in `bench` and `sweep`
+  artifacts; `hardware` is kept as a debug inspection command.
+- Model memory estimation through `hf-mem`, captured in the unified
+  `report.json`. Missing `hf-mem` is recorded as a warning, not treated as a
+  benchmark failure.
 - Serving containers are named/labeled per CLI process and cleaned up after
   `serve --execute`, `bench`, or `sweep` finish.
 - vLLM benchmark invocation through `vllm bench serve` inside the selected vLLM
   image.
 - SGLang benchmark invocation through `python3 -m sglang.bench_serving`
   inside the selected SGLang image.
-- Benchmark result capture with raw output, one-row TSV summaries, and
-  `best.conf` for the winning config in each result subdirectory.
+- Benchmark result capture in one structured `report.json` per execution,
+  including detected hardware, model memory estimates, raw benchmark output,
+  configs, and metrics. `config.conf` / `best.conf` are runnable convenience
+  files, not the source of truth.
 - Initial log classification for OOM and KV-cache pressure.
 - A small sync helper for sending the repo to the GPU machine:
   `scripts/sync-to-gpu.sh`.
@@ -89,6 +102,12 @@ cargo run -- bench --config examples/bench.conf --dry-run
 cargo run -- bench --engine vllm --model Qwen/Qwen3-4B-Instruct-2507 --kv-cache-dtype fp8 --dry-run
 cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32 --dry-run
 cargo run -- sweep --config examples/sweep.conf --dry-run
+```
+
+Debug hardware inspection:
+
+```bash
+cargo run -- hardware
 ```
 
 `bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
@@ -118,8 +137,11 @@ GPU smoke benchmark:
 
 ```bash
 export HF_TOKEN=hf_...
+# Optional but recommended for model-memory data in report.json:
+# curl -LsSf https://astral.sh/uv/install.sh | sh
 cargo run -- params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
 cargo run -- sweep --config examples/sweep.conf
+cat .optimum-advisor/results/<sweep-dir>/report.json
 cargo run -- bench --config .optimum-advisor/results/<sweep-dir>/best.conf
 cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 --num-prompts 4 --request-rate 1 --benchmark-max-concurrency 1 --random-output-len 32
 ```
@@ -135,6 +157,8 @@ cargo run -- bench --engine sglang --model Qwen/Qwen3-4B-Instruct-2507 --gpus 1 
 - Improve engine-specific heuristics for OOM, KV pressure, batching, tensor
   parallelism, pipeline parallelism, and memory utilization.
 - Add hardware/model discovery instead of requiring most setup details manually.
+- Use model memory estimates and detected hardware memory in advisor/tuner
+  heuristics.
 - Add constraints to the optimizer, such as latency ceilings or minimum
   throughput.
 - Expand Docker lifecycle handling with better logs, volumes, automatic port
