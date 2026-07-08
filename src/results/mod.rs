@@ -415,6 +415,10 @@ fn config_json(config: &ServingConfig) -> String {
     object(vec![
         ("engine", json_string(&config.engine.to_string())),
         ("image", json_string(&config.image)),
+        (
+            "resolved_image",
+            opt_string(config.resolved_image.as_deref()),
+        ),
         ("model", json_string(&config.model)),
         ("gpus", config.gpus.to_string()),
         ("host", json_string(&config.host)),
@@ -740,6 +744,7 @@ mod tests {
         ServingConfig {
             engine: Engine::Vllm,
             image: "vllm/vllm-openai:latest".to_string(),
+            resolved_image: Some("vllm/vllm-openai:v0.22.0".to_string()),
             model: "m".to_string(),
             gpus: 1,
             host: "127.0.0.1".to_string(),
@@ -1045,6 +1050,7 @@ Max ITL (ms):                            30.00",
         assert!(text.contains("\"artifacts\""));
         assert!(text.contains("\"benchmark_stderr\":\"stderr\\nline\""));
         assert!(text.contains("\"model\":\"m\""));
+        assert!(text.contains("\"resolved_image\":\"vllm/vllm-openai:v0.22.0\""));
     }
 
     #[test]
