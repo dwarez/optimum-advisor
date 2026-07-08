@@ -43,15 +43,7 @@ cargo uninstall optimum-advisor
 - Docker
 - NVIDIA runtime for GPU execution (`docker run --gpus ...`)
 - `HF_TOKEN` for benchmark execution
-- pinned lighteval correctness environment for the selected engine
 - Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
-
-Set up the Python environment on the GPU host:
-
-```bash
-./scripts/setup-python-env.sh vllm
-source .venv/bin/activate
-```
 
 ## Quick Start
 
@@ -65,8 +57,6 @@ Run a sweep on a GPU host:
 
 ```bash
 export HF_TOKEN=hf_...
-./scripts/setup-python-env.sh vllm
-source .venv/bin/activate
 optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
 optimum-advisor sweep --config examples/sweep.conf
 ```
@@ -137,12 +127,6 @@ optimum-advisor hardware
 `bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
 pair per candidate without starting containers.
 
-Dry-run output also prints the owned correctness gate. The suite definition is
-kept in code, not user config, so benchmark results cannot opt out of the
-project's correctness policy. Executed runs start a second local lighteval
-engine deployment with the same model and serving configuration after the
-serving benchmark finishes.
-
 ## Results
 
 Each execution writes a directory under `.optimum-advisor/results` unless
@@ -151,8 +135,7 @@ Each execution writes a directory under `.optimum-advisor/results` unless
 Main artifact:
 
 - `report.json`: source of truth with hardware, model-memory estimate, tested
-  configs, benchmark metrics, correctness results, stdout, stderr, winning
-  metric, and best trial
+  configs, benchmark metrics, stdout, stderr, winning metric, and best trial
 
 Convenience artifacts:
 
@@ -169,11 +152,11 @@ Implemented:
 - Docker lifecycle cleanup for owned server containers
 - hardware detection through `nvidia-smi`
 - optional model-memory estimation through `hf-mem`
-- owned lighteval correctness suite captured in `report.json`
 - structured benchmark reports and basic best-result selection
 
 Still missing:
 
+- endpoint-based correctness checks against the same served engine/config
 - failure-tolerant sweeps that record bad/OOM candidates instead of aborting
 - advisor heuristics using hardware and model-memory budgets
 - richer constraints such as latency ceilings and minimum throughput
