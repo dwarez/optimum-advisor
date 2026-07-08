@@ -129,6 +129,43 @@ optimum-advisor hardware
 pair per candidate without starting containers. Dry-runs also show the owned
 lighteval endpoint correctness suite that runs against the same server.
 
+## Leaderboard Submission
+
+Publishing is opt-in. Contributor identity comes from the local Hugging Face
+login, not from a CLI flag. A missing submit key is allowed; the leaderboard
+will queue the report for review. The submit key is never written to
+`report.json`.
+The default URL is `https://hf-dwarez-optimum-advisor-leaderboard.hf.space`;
+override it with `--leaderboard-url` or `OPTIMUM_ADVISOR_LEADERBOARD_URL`.
+
+Login first:
+
+```bash
+hf auth login
+```
+
+Queued submission:
+
+```bash
+OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT=1 \
+optimum-advisor bench --config examples/bench.conf
+```
+
+Approved submission:
+
+```bash
+OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT=1 \
+OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY=... \
+optimum-advisor sweep --config examples/sweep.conf
+```
+
+CLI equivalents are available:
+
+```bash
+optimum-advisor bench --config examples/bench.conf \
+  --leaderboard-submit
+```
+
 ## Results
 
 Each execution writes a directory under `.optimum-advisor/results` unless

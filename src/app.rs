@@ -12,6 +12,7 @@ use crate::correctness::{
 };
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
+use crate::leaderboard::{prepare_submission, submit_report_file, PreparedLeaderboardSubmission};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
@@ -151,6 +152,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
 
+    let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
     ensure_hf_token()?;
     ensure_lighteval_suite_ready(default_suite())?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
@@ -209,6 +211,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             config_file.display()
         ),
     )?;
+    maybe_submit_leaderboard(leaderboard_submission.as_ref(), &report_file, out)?;
     Ok(())
 }
 
@@ -222,6 +225,7 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         print_run_plans(adapter, &configs, out)?;
         return Ok(());
     }
+    let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
     ensure_hf_token()?;
     ensure_lighteval_suite_ready(default_suite())?;
     let first_config = configs
@@ -315,6 +319,29 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             best_config.display(),
         ),
     )?;
+    maybe_submit_leaderboard(leaderboard_submission.as_ref(), &report_file, out)?;
+    Ok(())
+}
+
+fn maybe_submit_leaderboard(
+    submission: Option<&PreparedLeaderboardSubmission>,
+    report_file: &Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let Some(submission) = submission else {
+        return Ok(());
+    };
+    terminal::info(
+        out,
+        "leaderbd",
+        format!(
+            "submitting report={} url={}",
+            report_file.display(),
+            submission.url()
+        ),
+    )?;
+    let result = submit_report_file(report_file, submission)?;
+    terminal::ok(out, "leaderbd", result.message)?;
     Ok(())
 }
 

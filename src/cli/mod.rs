@@ -1,5 +1,6 @@
 use crate::config::BenchmarkConfig;
 use crate::engine::{Engine, Metric, Mode};
+use crate::leaderboard::LeaderboardConfig;
 use crate::serve::{EngineArg, ServingParamSweep};
 use crate::trial::{Candidate, CandidateSweep};
 use crate::Result;
@@ -33,6 +34,7 @@ pub struct Setup {
     pub serve_sweep: ServingParamSweep,
     pub serve_args: Vec<EngineArg>,
     pub benchmark: BenchmarkConfig,
+    pub leaderboard: LeaderboardConfig,
 }
 
 impl Setup {
@@ -59,6 +61,7 @@ impl Setup {
             serve_sweep: ServingParamSweep::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
+            leaderboard: LeaderboardConfig::default(),
         }
     }
 }
@@ -78,6 +81,7 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
     };
 
     let mut setup = Setup::default_for_mode(mode);
+    setup.leaderboard.apply_env();
     if matches!(mode, Mode::Bench | Mode::Sweep) {
         setup.execute = true;
     }
@@ -116,6 +120,13 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
             "--execute" => setup.execute = true,
             "--dry-run" => setup.execute = false,
             "--log-file" => setup.log_file = Some(take_value(&mut args, "--log-file")?),
+            "--leaderboard-submit" => setup.leaderboard.submit = true,
+            "--leaderboard-url" => {
+                setup.leaderboard.url = take_value(&mut args, "--leaderboard-url")?
+            }
+            "--leaderboard-submit-key" => {
+                setup.leaderboard.submit_key = take_value(&mut args, "--leaderboard-submit-key")?
+            }
             "--serve-arg" => setup.serve_args.push(EngineArg::assignment(&take_value(
                 &mut args,
                 "--serve-arg",
@@ -226,6 +237,11 @@ pub fn parse_args(args: impl Iterator<Item = String>) -> Result<Setup> {
                 )?;
             }
             "-h" | "--help" => return Err(usage()),
+            unknown if unknown.starts_with("--leaderboard-") => {
+                return Err(format!(
+                    "unknown leaderboard option: {unknown}; contributor is inferred from Hugging Face login"
+                ));
+            }
             unknown if unknown.starts_with("--") => {
                 if let Some(value) = args.next_if(|value| !value.starts_with("--")) {
                     setup.serve_args.push(EngineArg::value(unknown, value));
@@ -282,8 +298,8 @@ fn usage() -> String {
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor hardware
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
-  optimum-advisor sweep --config PATH [--dry-run]
-  optimum-advisor bench --config PATH [--dry-run]
+  optimum-advisor sweep --config PATH [--dry-run] [--leaderboard-submit]
+  optimum-advisor bench --config PATH [--dry-run] [--leaderboard-submit]
   optimum-advisor bench --engine vllm|sglang --model MODEL [--gpus N] [--metric tps|total_tps|req_s|ttft|p99_ttft|tpot|p99_tpot|itl|p99_itl|e2e|p99_e2e] [--results-dir DIR] [--num-prompts N] [--request-rate R] [--dry-run]
   optimum-advisor advise --engine vllm|sglang --model MODEL --log-file PATH [--gpus N] [--tp N]"
         .to_string()
@@ -393,6 +409,52 @@ mod tests {
         .unwrap();
 
         assert_eq!(setup.results_dir, "results");
+    }
+
+    #[test]
+    fn accepts_leaderboard_flags_without_treating_key_as_serve_arg() {
+        let setup = parse_args(
+            [
+                "bench",
+                "--engine",
+                "vllm",
+                "--model",
+                "m",
+                "--leaderboard-submit",
+                "--leaderboard-url",
+                "https://example.test",
+                "--leaderboard-submit-key",
+                "secret",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+
+        assert!(setup.leaderboard.submit);
+        assert_eq!(setup.leaderboard.url, "https://example.test");
+        assert_eq!(setup.leaderboard.submit_key, "secret");
+        assert!(setup.serve_args.is_empty());
+    }
+
+    #[test]
+    fn rejects_user_supplied_leaderboard_contributor() {
+        let err = parse_args(
+            [
+                "bench",
+                "--engine",
+                "vllm",
+                "--model",
+                "m",
+                "--leaderboard-contributor",
+                "hf-dwarez",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("contributor is inferred"));
     }
 
     #[test]

@@ -4,6 +4,7 @@ pub mod cli;
 pub mod correctness;
 pub mod domain;
 pub mod engines;
+pub mod leaderboard;
 pub mod results;
 pub mod runtime;
 pub mod terminal;
