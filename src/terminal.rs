@@ -28,19 +28,24 @@ impl Level {
     }
 }
 
-pub fn info(out: &mut impl Write, event: &str, message: impl AsRef<str>) -> Result<()> {
+pub fn info(out: &mut (impl Write + ?Sized), event: &str, message: impl AsRef<str>) -> Result<()> {
     log(out, Level::Info, event, message)
 }
 
-pub fn ok(out: &mut impl Write, event: &str, message: impl AsRef<str>) -> Result<()> {
+pub fn ok(out: &mut (impl Write + ?Sized), event: &str, message: impl AsRef<str>) -> Result<()> {
     log(out, Level::Ok, event, message)
 }
 
-pub fn error(out: &mut impl Write, event: &str, message: impl AsRef<str>) -> Result<()> {
+pub fn error(out: &mut (impl Write + ?Sized), event: &str, message: impl AsRef<str>) -> Result<()> {
     log(out, Level::Error, event, message)
 }
 
-fn log(out: &mut impl Write, level: Level, event: &str, message: impl AsRef<str>) -> Result<()> {
+fn log(
+    out: &mut (impl Write + ?Sized),
+    level: Level,
+    event: &str,
+    message: impl AsRef<str>,
+) -> Result<()> {
     out.write_all(format_line(level, event, message.as_ref(), color_enabled()).as_bytes())
         .map_err(|err| format!("failed to write output: {err}"))
 }

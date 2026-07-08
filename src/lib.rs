@@ -1,6 +1,7 @@
 pub mod advisor;
 pub mod app;
 pub mod cli;
+pub mod correctness;
 pub mod domain;
 pub mod engines;
 pub mod results;
