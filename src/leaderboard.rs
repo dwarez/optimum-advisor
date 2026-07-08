@@ -177,11 +177,13 @@ fn infer_hf_username() -> Result<String> {
         ("huggingface-cli", &["whoami"][..]),
     ] {
         if let Ok(output) = Command::new(command).args(args).output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(username) = parse_whoami_username(&stdout) {
-                    return Ok(username);
-                }
+            let text = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if let Some(username) = parse_whoami_username(&text) {
+                return Ok(username);
             }
         }
     }
@@ -192,17 +194,39 @@ fn infer_hf_username() -> Result<String> {
 }
 
 fn parse_whoami_username(text: &str) -> Option<String> {
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let line = line
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines
+        .iter()
+        .any(|line| line.to_ascii_lowercase().contains("not logged"))
+    {
+        return None;
+    }
+
+    for line in &lines {
+        let Some(username) = line
             .strip_prefix("Username:")
             .or_else(|| line.strip_prefix("username:"))
-            .unwrap_or(line)
-            .trim();
-        if line.to_ascii_lowercase().contains("not logged") {
-            return None;
+            .or_else(|| line.strip_prefix("user:"))
+        else {
+            continue;
+        };
+        let username = username.trim().split_whitespace().next().unwrap_or("");
+        if !username.is_empty() {
+            return Some(username.to_string());
+        }
+    }
+
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("logged in") || lower.starts_with("orgs:") {
+            continue;
         }
         let username = line.split_whitespace().next().unwrap_or("");
-        if !username.is_empty() {
+        if !username.is_empty() && username != "✓" {
             return Some(username.to_string());
         }
     }
@@ -493,6 +517,10 @@ mod tests {
         );
         assert_eq!(
             parse_whoami_username("Username: hf-dwarez\norgs: test\n"),
+            Some("hf-dwarez".to_string())
+        );
+        assert_eq!(
+            parse_whoami_username("✓ Logged in\n  user: hf-dwarez\n  orgs: test\n"),
             Some("hf-dwarez".to_string())
         );
         assert_eq!(parse_whoami_username("Not logged in"), None);
