@@ -55,7 +55,29 @@ pub struct BenchmarkRunOutput {
     pub stderr: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManagedRunOutput {
+    pub benchmark: BenchmarkRunOutput,
+    pub correctness: Option<BenchmarkRunOutput>,
+}
+
 pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<BenchmarkRunOutput> {
+    execute_run_plan_inner(plan, None, &mut out).map(|output| output.benchmark)
+}
+
+pub fn execute_run_plan_with_correctness(
+    plan: &RunPlan,
+    correctness: &ProcessSpec,
+    mut out: impl Write,
+) -> Result<ManagedRunOutput> {
+    execute_run_plan_inner(plan, Some(correctness), &mut out)
+}
+
+fn execute_run_plan_inner(
+    plan: &RunPlan,
+    correctness: Option<&ProcessSpec>,
+    mut out: impl Write,
+) -> Result<ManagedRunOutput> {
     ensure_port_free(&plan.readiness)?;
     let (server_log, server_log_path) = open_server_log()?;
     terminal::info(&mut out, "server", "starting")?;
@@ -73,20 +95,14 @@ pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<Benchmark
     let result = (|| {
         wait_for_readiness(&plan.readiness, &mut server)?;
         terminal::ok(&mut out, "server", "ready")?;
-        terminal::info(&mut out, "benchmark", "running")?;
-        let output = Command::new(&plan.benchmark.program)
-            .args(&plan.benchmark.args)
-            .output()
-            .map_err(|err| format!("failed to start benchmark: {err}"))?;
-
-        if output.status.success() {
-            Ok(BenchmarkRunOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            })
-        } else {
-            Err(benchmark_failure(&output))
-        }
+        let correctness = correctness
+            .map(|spec| run_child("correct", spec, &mut out))
+            .transpose()?;
+        let benchmark = run_child("benchmark", &plan.benchmark, &mut out)?;
+        Ok(ManagedRunOutput {
+            benchmark,
+            correctness,
+        })
     })();
 
     stop_server(&mut server, plan.server_container.as_deref());
@@ -96,6 +112,23 @@ pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<Benchmark
             Ok(output)
         }
         Err(err) => Err(with_server_log(err, &server_log_path)),
+    }
+}
+
+fn run_child(label: &str, spec: &ProcessSpec, out: &mut impl Write) -> Result<BenchmarkRunOutput> {
+    terminal::info(out, label, "running")?;
+    let output = Command::new(&spec.program)
+        .args(&spec.args)
+        .output()
+        .map_err(|err| format!("failed to start {label}: {err}"))?;
+
+    if output.status.success() {
+        Ok(BenchmarkRunOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    } else {
+        Err(process_failure(label, &output))
     }
 }
 
@@ -195,11 +228,11 @@ fn open_server_log() -> Result<(File, PathBuf)> {
     Ok((file, path))
 }
 
-fn benchmark_failure(output: &std::process::Output) -> String {
-    let mut message = format!("benchmark exited with status {}", output.status);
+fn process_failure(label: &str, output: &std::process::Output) -> String {
+    let mut message = format!("{label} exited with status {}", output.status);
     let tail = output_tail(&output.stdout, &output.stderr);
     if !tail.trim().is_empty() {
-        message.push_str("\n--- benchmark output tail ---\n");
+        message.push_str(&format!("\n--- {label} output tail ---\n"));
         message.push_str(tail.trim_end());
     }
     message
@@ -401,6 +434,63 @@ mod tests {
     }
 
     #[test]
+    fn execute_run_plan_can_run_correctness_before_benchmark() {
+        if Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind test listener: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let plan = RunPlan {
+            server: ProcessSpec::new(
+                "python3",
+                vec![
+                    "-m".to_string(),
+                    "http.server".to_string(),
+                    port.to_string(),
+                    "--bind".to_string(),
+                    "127.0.0.1".to_string(),
+                ],
+            ),
+            benchmark: ProcessSpec::new(
+                "sh",
+                vec![
+                    "-c".to_string(),
+                    "printf 'Output token throughput (tok/s): 7\\n'".to_string(),
+                ],
+            ),
+            readiness: Readiness {
+                host: "127.0.0.1".to_string(),
+                port,
+                timeout: Duration::from_secs(5),
+                http_path: None,
+            },
+            server_container: None,
+        };
+        let correctness = ProcessSpec::new("sh", vec!["-c".to_string(), "printf ok".to_string()]);
+        let mut terminal = Vec::new();
+
+        let output = execute_run_plan_with_correctness(&plan, &correctness, &mut terminal).unwrap();
+
+        let terminal = String::from_utf8(terminal).unwrap();
+        assert!(terminal.contains("correct"));
+        assert!(!terminal.contains("Output token throughput"));
+        assert_eq!(output.correctness.unwrap().stdout, "ok");
+        assert!(output.benchmark.stdout.contains("Output token throughput"));
+    }
+
+    #[test]
     fn benchmark_failure_keeps_only_a_tail() {
         let output = std::process::Output {
             status: Command::new("sh").arg("-c").arg("exit 1").status().unwrap(),
@@ -411,7 +501,7 @@ mod tests {
             stderr: b"err\n".to_vec(),
         };
 
-        let message = benchmark_failure(&output);
+        let message = process_failure("benchmark", &output);
 
         assert!(message.contains("benchmark exited with status"));
         assert!(!message.contains("out0"));

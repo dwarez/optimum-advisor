@@ -43,6 +43,8 @@ cargo uninstall optimum-advisor
 - Docker
 - NVIDIA runtime for GPU execution (`docker run --gpus ...`)
 - `HF_TOKEN` for benchmark execution
+- `lighteval` plus owned-suite task deps for correctness checks, e.g.
+  `pip install lighteval "litellm[caching]>=1.66.0" langdetect`
 - Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
 
 ## Quick Start
@@ -127,6 +129,10 @@ optimum-advisor hardware
 `bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
 pair per candidate without starting containers.
 
+Dry-run output also prints the owned correctness gate. The suite definition is
+kept in code, not user config, so benchmark results cannot opt out of the
+project's correctness policy.
+
 ## Results
 
 Each execution writes a directory under `.optimum-advisor/results` unless
@@ -135,7 +141,8 @@ Each execution writes a directory under `.optimum-advisor/results` unless
 Main artifact:
 
 - `report.json`: source of truth with hardware, model-memory estimate, tested
-  configs, benchmark metrics, stdout, stderr, winning metric, and best trial
+  configs, benchmark metrics, correctness results, stdout, stderr, winning
+  metric, and best trial
 
 Convenience artifacts:
 
@@ -152,6 +159,7 @@ Implemented:
 - Docker lifecycle cleanup for owned server containers
 - hardware detection through `nvidia-smi`
 - optional model-memory estimation through `hf-mem`
+- owned lighteval correctness suite captured in `report.json`
 - structured benchmark reports and basic best-result selection
 
 Still missing:

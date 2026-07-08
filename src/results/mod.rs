@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::advisor::hardware::{GpuInfo, HardwareProfile};
 use crate::advisor::model_memory::ModelMemoryEstimate;
 use crate::config::ServingConfig;
+use crate::correctness::{CorrectnessArtifact, CorrectnessResult};
 use crate::engine::{Engine, Metric};
 use crate::serve::EngineArg;
 use crate::Result;
@@ -170,6 +171,7 @@ pub struct TrialResult {
     pub hardware: HardwareProfile,
     pub model_memory: ModelMemoryEstimate,
     pub metrics: BenchmarkMetrics,
+    pub correctness: Option<CorrectnessResult>,
     pub benchmark_stdout: String,
     pub benchmark_stderr: String,
 }
@@ -190,9 +192,15 @@ impl TrialResult {
             hardware,
             model_memory,
             metrics,
+            correctness: None,
             benchmark_stdout,
             benchmark_stderr,
         }
+    }
+
+    pub fn with_correctness(mut self, correctness: CorrectnessResult) -> Self {
+        self.correctness = Some(correctness);
+        self
     }
 
     pub fn winning_value(&self) -> Option<f64> {
@@ -261,6 +269,11 @@ pub fn write_config_file(dir: impl AsRef<Path>, name: &str, text: &str) -> Resul
 }
 
 fn compare_results(left: &TrialResult, right: &TrialResult, metric: Metric) -> Ordering {
+    let correctness = correctness_rank(left).cmp(&correctness_rank(right));
+    if correctness != Ordering::Equal {
+        return correctness;
+    }
+
     match (
         left.metrics.value_for(metric),
         right.metrics.value_for(metric),
@@ -271,6 +284,14 @@ fn compare_results(left: &TrialResult, right: &TrialResult, metric: Metric) -> O
         (None, Some(_)) => Ordering::Greater,
         (None, None) => Ordering::Equal,
     }
+}
+
+fn correctness_rank(result: &TrialResult) -> u8 {
+    result
+        .correctness
+        .as_ref()
+        .map(|correctness| correctness.status.rank())
+        .unwrap_or(0)
 }
 
 fn first_number(text: &str) -> Option<f64> {
@@ -325,12 +346,68 @@ fn trial_json(index: usize, result: &TrialResult) -> String {
         ("config", config_json(&result.config)),
         ("metrics", metrics_json(&result.metrics)),
         (
+            "correctness",
+            opt_correctness_json(result.correctness.as_ref()),
+        ),
+        (
             "logs",
             object(vec![
                 ("benchmark_stdout", json_string(&result.benchmark_stdout)),
                 ("benchmark_stderr", json_string(&result.benchmark_stderr)),
             ]),
         ),
+    ])
+}
+
+fn opt_correctness_json(correctness: Option<&CorrectnessResult>) -> String {
+    correctness
+        .map(correctness_json)
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn correctness_json(result: &CorrectnessResult) -> String {
+    object(vec![
+        ("suite_id", json_string(&result.suite_id)),
+        ("status", json_string(result.status.as_str())),
+        ("score", opt_f64(result.score)),
+        ("threshold", result.threshold.to_string()),
+        ("max_samples", result.max_samples.to_string()),
+        (
+            "tasks",
+            array(result.tasks.iter().map(correctness_task_json).collect()),
+        ),
+        (
+            "artifacts",
+            array(
+                result
+                    .artifacts
+                    .iter()
+                    .map(correctness_artifact_json)
+                    .collect(),
+            ),
+        ),
+        (
+            "logs",
+            object(vec![
+                ("stdout", json_string(&result.stdout)),
+                ("stderr", json_string(&result.stderr)),
+            ]),
+        ),
+    ])
+}
+
+fn correctness_task_json(task: &crate::correctness::CorrectnessTaskResult) -> String {
+    object(vec![
+        ("domain", json_string(&task.domain)),
+        ("spec", json_string(&task.spec)),
+        ("score", opt_f64(task.score)),
+    ])
+}
+
+fn correctness_artifact_json(artifact: &CorrectnessArtifact) -> String {
+    object(vec![
+        ("path", json_string(&artifact.path)),
+        ("json", json_string(&artifact.json)),
     ])
 }
 
@@ -655,6 +732,7 @@ impl MetricDirection for Metric {
 mod tests {
     use super::*;
     use crate::config::BenchmarkConfig;
+    use crate::correctness::{CorrectnessStatus, CorrectnessTaskResult};
     use crate::engine::Engine;
     use crate::trial::Candidate;
 
@@ -705,6 +783,27 @@ mod tests {
             raw_stdout: String::new(),
             raw_stderr: String::new(),
             warnings: Vec::new(),
+        }
+    }
+
+    fn correctness(status: CorrectnessStatus, score: Option<f64>) -> CorrectnessResult {
+        CorrectnessResult {
+            suite_id: "oa-fast-v1".to_string(),
+            status,
+            score,
+            threshold: 0.6,
+            max_samples: 20,
+            tasks: vec![CorrectnessTaskResult {
+                domain: "math".to_string(),
+                spec: "gsm8k|0".to_string(),
+                score,
+            }],
+            artifacts: vec![CorrectnessArtifact {
+                path: "correctness/results/model/results_1.json".to_string(),
+                json: "{\"results\":{\"gsm8k|0\":{\"em\":1.0}}}".to_string(),
+            }],
+            stdout: "correct stdout".to_string(),
+            stderr: String::new(),
         }
     }
 
@@ -877,6 +976,39 @@ Max ITL (ms):                            30.00",
     }
 
     #[test]
+    fn sorts_correct_trials_before_faster_failed_trials() {
+        let passed = TrialResult::new(
+            config(),
+            Metric::Tps,
+            hardware(),
+            model_memory(),
+            "Output token throughput (tok/s): 1".to_string(),
+            String::new(),
+        )
+        .with_correctness(correctness(CorrectnessStatus::Passed, Some(0.8)));
+        let failed = TrialResult::new(
+            config(),
+            Metric::Tps,
+            hardware(),
+            model_memory(),
+            "Output token throughput (tok/s): 99".to_string(),
+            String::new(),
+        )
+        .with_correctness(correctness(CorrectnessStatus::Failed, Some(0.1)));
+        let mut set = ResultSet::new(Metric::Tps);
+        set.push(failed);
+        set.push(passed);
+
+        set.sort_best_first();
+
+        assert_eq!(
+            set.best().unwrap().correctness.as_ref().unwrap().status,
+            CorrectnessStatus::Passed
+        );
+        assert_eq!(set.best().unwrap().winning_value(), Some(1.0));
+    }
+
+    #[test]
     fn writes_unified_report_file() {
         let result = TrialResult::new(
             config(),
@@ -885,7 +1017,8 @@ Max ITL (ms):                            30.00",
             model_memory(),
             "Output token throughput (tok/s): 27.54".to_string(),
             "stderr\nline".to_string(),
-        );
+        )
+        .with_correctness(correctness(CorrectnessStatus::Passed, Some(1.0)));
         let mut results = ResultSet::new(Metric::Tps);
         results.push(result);
         let dir = std::env::temp_dir().join(format!(
@@ -904,6 +1037,10 @@ Max ITL (ms):                            30.00",
         assert!(text.contains("\"compute_capability\":\"8.9\""));
         assert!(text.contains("\"model_memory\""));
         assert!(text.contains("\"total_bytes\":30"));
+        assert!(text.contains("\"correctness\""));
+        assert!(text.contains("\"status\":\"passed\""));
+        assert!(text.contains("\"score\":1"));
+        assert!(text.contains("\"artifacts\""));
         assert!(text.contains("\"benchmark_stderr\":\"stderr\\nline\""));
         assert!(text.contains("\"model\":\"m\""));
     }

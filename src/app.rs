@@ -6,6 +6,9 @@ use crate::advisor::hardware::{detect_hardware, format_hardware_profile, summari
 use crate::advisor::model_memory::{estimate_model_memory, summarize_model_memory};
 use crate::cli::parse_args;
 use crate::config::ServingConfig;
+use crate::correctness::{
+    collect_lighteval_result, default_suite, ensure_lighteval_suite_ready, lighteval_plan,
+};
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
 use crate::logs::classify_log;
@@ -13,7 +16,7 @@ use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
     create_run_dir, write_best_config, write_config_file, write_report, ResultSet, TrialResult,
 };
-use crate::runner::{execute_run_plan, execute_server_plan};
+use crate::runner::{execute_run_plan_with_correctness, execute_server_plan};
 use crate::serve::EngineArg;
 use crate::terminal;
 use crate::Result;
@@ -86,6 +89,7 @@ fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     .map_err(write_error)?;
     writeln!(out, "serve: {}", plan.server.shell()).map_err(write_error)?;
     writeln!(out, "bench: {}", plan.benchmark.shell()).map_err(write_error)?;
+    print_correctness_plan(&config, out)?;
     Ok(())
 }
 
@@ -147,6 +151,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     }
 
     ensure_hf_token()?;
+    ensure_lighteval_suite_ready(default_suite())?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
     let hardware = detect_hardware();
     terminal::info(
@@ -164,15 +169,26 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
     validate_serving_args(setup, &config)?;
     let plan = adapter.run_plan(&config);
-    let output = execute_run_plan(&plan, &mut *out)?;
+    let correctness_dir = run_dir.join("correctness");
+    let correctness_plan = lighteval_plan(&config, &correctness_dir);
+    let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
+    let correctness = collect_lighteval_result(
+        default_suite(),
+        &correctness_dir,
+        output
+            .correctness
+            .ok_or("correctness execution did not produce output")?,
+    )?;
+    log_correctness(out, &correctness)?;
     let result = TrialResult::new(
         config,
         setup.metric,
         hardware,
         model_memory,
-        output.stdout,
-        output.stderr,
-    );
+        output.benchmark.stdout,
+        output.benchmark.stderr,
+    )
+    .with_correctness(correctness);
     let mut results = ResultSet::new(setup.metric);
     results.push(result);
     let report_file = write_report(&run_dir, "bench", &results)?;
@@ -206,6 +222,7 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
     ensure_hf_token()?;
+    ensure_lighteval_suite_ready(default_suite())?;
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
     let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
@@ -245,15 +262,26 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         )?;
         validate_serving_args(setup, &config)?;
         let plan = adapter.run_plan(&config);
-        let output = execute_run_plan(&plan, &mut *out)?;
+        let correctness_dir = run_dir.join(format!("trial-{}-correctness", index + 1));
+        let correctness_plan = lighteval_plan(&config, &correctness_dir);
+        let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
+        let correctness = collect_lighteval_result(
+            default_suite(),
+            &correctness_dir,
+            output
+                .correctness
+                .ok_or("correctness execution did not produce output")?,
+        )?;
+        log_correctness(out, &correctness)?;
         let result = TrialResult::new(
             config,
             setup.metric,
             hardware.clone(),
             model_memory.clone(),
-            output.stdout,
-            output.stderr,
-        );
+            output.benchmark.stdout,
+            output.benchmark.stderr,
+        )
+        .with_correctness(correctness);
         terminal::ok(out, "metrics", metrics_line(&result))?;
         results.push(result);
     }
@@ -324,8 +352,24 @@ fn print_run_plans(
         }
         writeln!(out, "server: {}", plan.server.shell()).map_err(write_error)?;
         writeln!(out, "benchmark: {}", plan.benchmark.shell()).map_err(write_error)?;
+        print_correctness_plan(config, out)?;
     }
     Ok(())
+}
+
+fn print_correctness_plan(config: &ServingConfig, out: &mut impl Write) -> Result<()> {
+    let suite = default_suite();
+    let plan = lighteval_plan(config, Path::new("<run-dir>/correctness"));
+    writeln!(
+        out,
+        "correctness_suite: id={}, threshold={:.2}, max_samples={}, tasks={}",
+        suite.id,
+        suite.threshold,
+        suite.max_samples,
+        suite.task_spec()
+    )
+    .map_err(write_error)?;
+    writeln!(out, "correctness: {}", plan.shell()).map_err(write_error)
 }
 
 fn describe_config(adapter: &dyn EngineAdapter, config: &ServingConfig) -> String {
@@ -390,6 +434,27 @@ fn metrics_line(result: &TrialResult) -> String {
         "unavailable".to_string()
     } else {
         parts.join(", ")
+    }
+}
+
+fn log_correctness(
+    out: &mut impl Write,
+    result: &crate::correctness::CorrectnessResult,
+) -> Result<()> {
+    let message = format!(
+        "status={} score={} threshold={:.2} artifacts={}",
+        result.status.as_str(),
+        result
+            .score
+            .map(|score| format!("{score:.4}"))
+            .unwrap_or_else(|| "unknown".to_string()),
+        result.threshold,
+        result.artifacts.len()
+    );
+    if result.status == crate::correctness::CorrectnessStatus::Passed {
+        terminal::ok(out, "correct", message)
+    } else {
+        terminal::info(out, "correct", message)
     }
 }
 
