@@ -43,9 +43,15 @@ cargo uninstall optimum-advisor
 - Docker
 - NVIDIA runtime for GPU execution (`docker run --gpus ...`)
 - `HF_TOKEN` for benchmark execution
-- `lighteval` plus owned-suite task deps for correctness checks, e.g.
-  `pip install lighteval "litellm[caching]>=1.66.0" langdetect`
+- pinned lighteval correctness environment for the selected engine
 - Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
+
+Set up the Python environment on the GPU host:
+
+```bash
+./scripts/setup-python-env.sh vllm
+source .venv/bin/activate
+```
 
 ## Quick Start
 
@@ -59,6 +65,8 @@ Run a sweep on a GPU host:
 
 ```bash
 export HF_TOKEN=hf_...
+./scripts/setup-python-env.sh vllm
+source .venv/bin/activate
 optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
 optimum-advisor sweep --config examples/sweep.conf
 ```
@@ -131,7 +139,9 @@ pair per candidate without starting containers.
 
 Dry-run output also prints the owned correctness gate. The suite definition is
 kept in code, not user config, so benchmark results cannot opt out of the
-project's correctness policy.
+project's correctness policy. Executed runs start a second local lighteval
+engine deployment with the same model and serving configuration after the
+serving benchmark finishes.
 
 ## Results
 

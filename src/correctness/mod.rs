@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::config::ServingConfig;
+use crate::engine::Engine;
 use crate::runner::{BenchmarkRunOutput, ProcessSpec};
 use crate::Result;
 
@@ -65,8 +66,8 @@ pub fn lighteval_plan(config: &ServingConfig, output_dir: impl AsRef<Path>) -> P
     lighteval_plan_for_suite(default_suite(), config, output_dir)
 }
 
-pub fn ensure_lighteval_suite_ready(suite: &CorrectnessSuite) -> Result<()> {
-    ensure_litellm_backend_ready()?;
+pub fn ensure_lighteval_suite_ready(engine: Engine, suite: &CorrectnessSuite) -> Result<()> {
+    ensure_engine_backend_ready(engine)?;
     for task in suite.tasks {
         let output = Command::new("lighteval")
             .args(["tasks", "inspect", task.spec])
@@ -75,12 +76,12 @@ pub fn ensure_lighteval_suite_ready(suite: &CorrectnessSuite) -> Result<()> {
             .output()
             .map_err(|err| {
                 format!(
-                    "lighteval is required for correctness checks: {err}; install with `pip install lighteval langdetect`"
+                    "lighteval is required for correctness checks: {err}; run `./scripts/setup-python-env.sh {engine}`"
                 )
             })?;
         if !output.status.success() {
             return Err(format!(
-                "correctness task preflight failed for {}. Install missing lighteval task dependencies, e.g. `pip install langdetect` for IFEval.\n{}",
+                "correctness task preflight failed for {}. Run `./scripts/setup-python-env.sh {engine}` to install pinned lighteval deps.\n{}",
                 task.spec,
                 tail(&String::from_utf8_lossy(&output.stderr), 20)
             ));
@@ -89,28 +90,36 @@ pub fn ensure_lighteval_suite_ready(suite: &CorrectnessSuite) -> Result<()> {
     Ok(())
 }
 
-fn ensure_litellm_backend_ready() -> Result<()> {
+fn ensure_engine_backend_ready(engine: Engine) -> Result<()> {
+    let package = match engine {
+        Engine::Vllm => "vllm",
+        Engine::Sglang => "sglang",
+    };
     let output = Command::new("python3")
-        .args([
-            "-c",
-            "import importlib.metadata as m, re\nimport litellm, diskcache\nversion = tuple(int(x) for x in re.findall(r'\\d+', m.version('litellm'))[:3])\nassert version >= (1, 66, 0), m.version('litellm')\n",
-        ])
+        .args(["-c", &backend_preflight_code(engine, package)])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|err| {
-            format!(
-                "failed to run lighteval LiteLLM backend preflight: {err}; install with `pip install \"litellm[caching]>=1.66.0\"`"
-            )
-        })?;
+        .map_err(|err| format!("failed to run lighteval {engine} backend preflight: {err}"))?;
     if output.status.success() {
         return Ok(());
     }
 
     Err(format!(
-        "correctness backend preflight failed for lighteval endpoint litellm. Install missing backend deps with `pip install \"litellm[caching]>=1.66.0\"`.\n{}",
+        "correctness backend preflight failed for lighteval {engine}. Run `./scripts/setup-python-env.sh {engine}` to install pinned deps.\n{}",
         tail(&String::from_utf8_lossy(&output.stderr), 20)
     ))
+}
+
+fn backend_preflight_code(engine: Engine, package: &str) -> String {
+    let mut code = format!("import lighteval, {package}\n");
+    if engine == Engine::Vllm {
+        code.push_str(
+            "from transformers import PreTrainedTokenizerBase\n\
+             assert any('all_special_tokens_extended' in vars(cls) for cls in PreTrainedTokenizerBase.__mro__), 'pinned transformers install is required'\n",
+        );
+    }
+    code
 }
 
 pub fn lighteval_plan_for_suite(
@@ -118,26 +127,142 @@ pub fn lighteval_plan_for_suite(
     config: &ServingConfig,
     output_dir: impl AsRef<Path>,
 ) -> ProcessSpec {
-    ProcessSpec::new(
-        "lighteval",
-        vec![
-            "endpoint".to_string(),
-            "litellm".to_string(),
-            model_args(config),
+    let mut args = match config.engine {
+        Engine::Vllm => vec![
+            "vllm".to_string(),
+            vllm_model_args(config),
             suite.task_spec(),
-            "--max-samples".to_string(),
-            suite.max_samples.to_string(),
-            "--output-dir".to_string(),
-            output_dir.as_ref().display().to_string(),
         ],
-    )
+        Engine::Sglang => vec![
+            "sglang".to_string(),
+            sglang_model_args(config),
+            suite.task_spec(),
+        ],
+    };
+    args.extend([
+        "--max-samples".to_string(),
+        suite.max_samples.to_string(),
+        "--output-dir".to_string(),
+        output_dir.as_ref().display().to_string(),
+    ]);
+    if config.engine == Engine::Vllm {
+        let mut env_args = vec![
+            "VLLM_WORKER_MULTIPROC_METHOD=spawn".to_string(),
+            "lighteval".to_string(),
+        ];
+        env_args.extend(args);
+        return ProcessSpec::new("env", env_args);
+    }
+    ProcessSpec::new("lighteval", args)
 }
 
-fn model_args(config: &ServingConfig) -> String {
-    format!(
-        "provider=openai,model_name=openai/{},base_url=http://{}:{}/v1,api_key=EMPTY",
-        config.model, config.host, config.port
-    )
+fn vllm_model_args(config: &ServingConfig) -> String {
+    model_args(vec![
+        ("model_name".to_string(), config.model.clone()),
+        (
+            "tensor_parallel_size".to_string(),
+            serve_arg_value(
+                config,
+                "--tensor-parallel-size",
+                config.candidate.parallelism.tensor,
+            ),
+        ),
+        (
+            "data_parallel_size".to_string(),
+            serve_arg_value(
+                config,
+                "--data-parallel-size",
+                config.candidate.parallelism.data,
+            ),
+        ),
+        (
+            "pipeline_parallel_size".to_string(),
+            serve_arg_value(
+                config,
+                "--pipeline-parallel-size",
+                config.candidate.parallelism.pipeline,
+            ),
+        ),
+        (
+            "gpu_memory_utilization".to_string(),
+            serve_arg_value(
+                config,
+                "--gpu-memory-utilization",
+                format!("{:.2}", config.candidate.memory.fraction),
+            ),
+        ),
+        (
+            "max_model_length".to_string(),
+            serve_arg_value(config, "--max-model-len", config.max_model_len),
+        ),
+        (
+            "max_num_batched_tokens".to_string(),
+            serve_arg_value(
+                config,
+                "--max-num-batched-tokens",
+                config.candidate.scheduler.prefill_token_budget,
+            ),
+        ),
+        (
+            "max_num_seqs".to_string(),
+            serve_arg_value(
+                config,
+                "--max-num-seqs",
+                config.candidate.scheduler.max_running_requests,
+            ),
+        ),
+    ])
+}
+
+fn sglang_model_args(config: &ServingConfig) -> String {
+    model_args(vec![
+        ("model_name".to_string(), config.model.clone()),
+        (
+            "tp_size".to_string(),
+            serve_arg_value(config, "--tp-size", config.candidate.parallelism.tensor),
+        ),
+        (
+            "dp_size".to_string(),
+            serve_arg_value(config, "--dp-size", config.candidate.parallelism.data),
+        ),
+        (
+            "context_length".to_string(),
+            serve_arg_value(config, "--context-length", config.max_model_len),
+        ),
+        (
+            "mem_fraction_static".to_string(),
+            serve_arg_value(
+                config,
+                "--mem-fraction-static",
+                format!("{:.2}", config.candidate.memory.fraction),
+            ),
+        ),
+        (
+            "chunked_prefill_size".to_string(),
+            serve_arg_value(
+                config,
+                "--chunked-prefill-size",
+                config.candidate.scheduler.prefill_token_budget,
+            ),
+        ),
+    ])
+}
+
+fn serve_arg_value(config: &ServingConfig, name: &str, default: impl ToString) -> String {
+    config
+        .serve_args
+        .iter()
+        .rev()
+        .find(|arg| arg.name == name)
+        .and_then(|arg| arg.value.clone())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn model_args(args: Vec<(String, String)>) -> String {
+    args.into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub fn collect_lighteval_result(
@@ -310,6 +435,7 @@ mod tests {
     use super::*;
     use crate::config::BenchmarkConfig;
     use crate::engine::{Engine, Metric};
+    use crate::serve::EngineArg;
     use crate::trial::Candidate;
 
     fn config() -> ServingConfig {
@@ -340,17 +466,55 @@ mod tests {
     }
 
     #[test]
-    fn lighteval_plan_targets_served_openai_endpoint() {
+    fn vllm_preflight_checks_pinned_tokenizer_api() {
+        let code = backend_preflight_code(Engine::Vllm, "vllm");
+
+        assert!(code.contains("import lighteval, vllm"));
+        assert!(code.contains("all_special_tokens_extended"));
+    }
+
+    #[test]
+    fn lighteval_plan_uses_engine_backend_and_config() {
         let plan = lighteval_plan(&config(), ".optimum-advisor/results/run/correctness");
 
-        assert_eq!(plan.program, "lighteval");
-        assert!(plan.args.contains(&"endpoint".to_string()));
-        assert!(plan.args.contains(&"litellm".to_string()));
+        assert_eq!(plan.program, "env");
         assert!(plan
             .args
-            .contains(&"provider=openai,model_name=openai/Qwen/Qwen3-4B-Instruct-2507,base_url=http://127.0.0.1:8000/v1,api_key=EMPTY".to_string()));
+            .contains(&"VLLM_WORKER_MULTIPROC_METHOD=spawn".to_string()));
+        assert!(plan.args.contains(&"lighteval".to_string()));
+        assert!(plan.args.contains(&"vllm".to_string()));
+        assert!(plan
+            .args
+            .contains(&"model_name=Qwen/Qwen3-4B-Instruct-2507,tensor_parallel_size=1,data_parallel_size=1,pipeline_parallel_size=1,gpu_memory_utilization=0.90,max_model_length=8192,max_num_batched_tokens=8192,max_num_seqs=256".to_string()));
         assert!(plan.args.contains(&"--max-samples".to_string()));
         assert!(plan.args.contains(&default_suite().max_samples.to_string()));
+    }
+
+    #[test]
+    fn lighteval_plan_uses_effective_canonical_serve_overrides() {
+        let mut config = config();
+        config
+            .serve_args
+            .push(EngineArg::value("tensor-parallel-size", "2"));
+
+        let plan = lighteval_plan(&config, ".optimum-advisor/results/run/correctness");
+
+        assert!(plan.args.iter().any(|arg| {
+            arg.contains("tensor_parallel_size=2") && arg.contains("max_model_length=8192")
+        }));
+    }
+
+    #[test]
+    fn lighteval_plan_maps_sglang_config() {
+        let mut config = config();
+        config.engine = Engine::Sglang;
+        config.candidate.memory.fraction = 0.88;
+
+        let plan = lighteval_plan(&config, ".optimum-advisor/results/run/correctness");
+
+        assert_eq!(plan.program, "lighteval");
+        assert!(plan.args.contains(&"sglang".to_string()));
+        assert!(plan.args.contains(&"model_name=Qwen/Qwen3-4B-Instruct-2507,tp_size=1,dp_size=1,context_length=8192,mem_fraction_static=0.88,chunked_prefill_size=8192".to_string()));
     }
 
     #[test]

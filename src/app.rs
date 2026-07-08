@@ -16,7 +16,7 @@ use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
     create_run_dir, write_best_config, write_config_file, write_report, ResultSet, TrialResult,
 };
-use crate::runner::{execute_run_plan_with_correctness, execute_server_plan};
+use crate::runner::{execute_process, execute_run_plan, execute_server_plan};
 use crate::serve::EngineArg;
 use crate::terminal;
 use crate::Result;
@@ -151,7 +151,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     }
 
     ensure_hf_token()?;
-    ensure_lighteval_suite_ready(default_suite())?;
+    ensure_lighteval_suite_ready(setup.engine, default_suite())?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
     let hardware = detect_hardware();
     terminal::info(
@@ -169,24 +169,22 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
     validate_serving_args(setup, &config)?;
     let plan = adapter.run_plan(&config);
+    let output = execute_run_plan(&plan, &mut *out)?;
     let correctness_dir = run_dir.join("correctness");
+    fs::create_dir_all(&correctness_dir)
+        .map_err(|err| format!("failed to create {}: {err}", correctness_dir.display()))?;
     let correctness_plan = lighteval_plan(&config, &correctness_dir);
-    let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
-    let correctness = collect_lighteval_result(
-        default_suite(),
-        &correctness_dir,
-        output
-            .correctness
-            .ok_or("correctness execution did not produce output")?,
-    )?;
+    let correctness_output = execute_process("correct", &correctness_plan, &mut *out)?;
+    let correctness =
+        collect_lighteval_result(default_suite(), &correctness_dir, correctness_output)?;
     log_correctness(out, &correctness)?;
     let result = TrialResult::new(
         config,
         setup.metric,
         hardware,
         model_memory,
-        output.benchmark.stdout,
-        output.benchmark.stderr,
+        output.stdout,
+        output.stderr,
     )
     .with_correctness(correctness);
     let mut results = ResultSet::new(setup.metric);
@@ -222,14 +220,14 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
     ensure_hf_token()?;
-    ensure_lighteval_suite_ready(default_suite())?;
+    let first_config = configs
+        .first()
+        .ok_or("sweep produced no candidate configs")?;
+    ensure_lighteval_suite_ready(setup.engine, default_suite())?;
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
     let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
     let hardware = detect_hardware();
-    let first_config = configs
-        .first()
-        .ok_or("sweep produced no candidate configs")?;
     terminal::info(
         out,
         "model-mem",
@@ -262,24 +260,22 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         )?;
         validate_serving_args(setup, &config)?;
         let plan = adapter.run_plan(&config);
+        let output = execute_run_plan(&plan, &mut *out)?;
         let correctness_dir = run_dir.join(format!("trial-{}-correctness", index + 1));
+        fs::create_dir_all(&correctness_dir)
+            .map_err(|err| format!("failed to create {}: {err}", correctness_dir.display()))?;
         let correctness_plan = lighteval_plan(&config, &correctness_dir);
-        let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
-        let correctness = collect_lighteval_result(
-            default_suite(),
-            &correctness_dir,
-            output
-                .correctness
-                .ok_or("correctness execution did not produce output")?,
-        )?;
+        let correctness_output = execute_process("correct", &correctness_plan, &mut *out)?;
+        let correctness =
+            collect_lighteval_result(default_suite(), &correctness_dir, correctness_output)?;
         log_correctness(out, &correctness)?;
         let result = TrialResult::new(
             config,
             setup.metric,
             hardware.clone(),
             model_memory.clone(),
-            output.benchmark.stdout,
-            output.benchmark.stderr,
+            output.stdout,
+            output.stderr,
         )
         .with_correctness(correctness);
         terminal::ok(out, "metrics", metrics_line(&result))?;

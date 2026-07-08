@@ -55,29 +55,7 @@ pub struct BenchmarkRunOutput {
     pub stderr: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ManagedRunOutput {
-    pub benchmark: BenchmarkRunOutput,
-    pub correctness: Option<BenchmarkRunOutput>,
-}
-
 pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<BenchmarkRunOutput> {
-    execute_run_plan_inner(plan, None, &mut out).map(|output| output.benchmark)
-}
-
-pub fn execute_run_plan_with_correctness(
-    plan: &RunPlan,
-    correctness: &ProcessSpec,
-    mut out: impl Write,
-) -> Result<ManagedRunOutput> {
-    execute_run_plan_inner(plan, Some(correctness), &mut out)
-}
-
-fn execute_run_plan_inner(
-    plan: &RunPlan,
-    correctness: Option<&ProcessSpec>,
-    mut out: impl Write,
-) -> Result<ManagedRunOutput> {
     ensure_port_free(&plan.readiness)?;
     let (server_log, server_log_path) = open_server_log()?;
     terminal::info(&mut out, "server", "starting")?;
@@ -95,14 +73,7 @@ fn execute_run_plan_inner(
     let result = (|| {
         wait_for_readiness(&plan.readiness, &mut server)?;
         terminal::ok(&mut out, "server", "ready")?;
-        let correctness = correctness
-            .map(|spec| run_child("correct", spec, &mut out))
-            .transpose()?;
-        let benchmark = run_child("benchmark", &plan.benchmark, &mut out)?;
-        Ok(ManagedRunOutput {
-            benchmark,
-            correctness,
-        })
+        run_child("benchmark", &plan.benchmark, &mut out)
     })();
 
     stop_server(&mut server, plan.server_container.as_deref());
@@ -113,6 +84,14 @@ fn execute_run_plan_inner(
         }
         Err(err) => Err(with_server_log(err, &server_log_path)),
     }
+}
+
+pub fn execute_process(
+    label: &str,
+    spec: &ProcessSpec,
+    mut out: impl Write,
+) -> Result<BenchmarkRunOutput> {
+    run_child(label, spec, &mut out)
 }
 
 fn run_child(label: &str, spec: &ProcessSpec, out: &mut impl Write) -> Result<BenchmarkRunOutput> {
@@ -434,60 +413,22 @@ mod tests {
     }
 
     #[test]
-    fn execute_run_plan_can_run_correctness_before_benchmark() {
-        if Command::new("python3")
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_err()
-        {
-            return;
-        }
-        let listener = match TcpListener::bind("127.0.0.1:0") {
-            Ok(listener) => listener,
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
-            Err(err) => panic!("failed to bind test listener: {err}"),
-        };
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-
-        let plan = RunPlan {
-            server: ProcessSpec::new(
-                "python3",
-                vec![
-                    "-m".to_string(),
-                    "http.server".to_string(),
-                    port.to_string(),
-                    "--bind".to_string(),
-                    "127.0.0.1".to_string(),
-                ],
-            ),
-            benchmark: ProcessSpec::new(
-                "sh",
-                vec![
-                    "-c".to_string(),
-                    "printf 'Output token throughput (tok/s): 7\\n'".to_string(),
-                ],
-            ),
-            readiness: Readiness {
-                host: "127.0.0.1".to_string(),
-                port,
-                timeout: Duration::from_secs(5),
-                http_path: None,
-            },
-            server_container: None,
-        };
-        let correctness = ProcessSpec::new("sh", vec!["-c".to_string(), "printf ok".to_string()]);
+    fn execute_process_keeps_child_output_out_of_terminal() {
+        let spec = ProcessSpec::new(
+            "sh",
+            vec!["-c".to_string(), "printf ok; printf noisy >&2".to_string()],
+        );
         let mut terminal = Vec::new();
 
-        let output = execute_run_plan_with_correctness(&plan, &correctness, &mut terminal).unwrap();
+        let output = execute_process("correct", &spec, &mut terminal).unwrap();
 
         let terminal = String::from_utf8(terminal).unwrap();
         assert!(terminal.contains("correct"));
-        assert!(!terminal.contains("Output token throughput"));
-        assert_eq!(output.correctness.unwrap().stdout, "ok");
-        assert!(output.benchmark.stdout.contains("Output token throughput"));
+        assert!(terminal.contains("running"));
+        assert!(!terminal.contains("ok"));
+        assert!(!terminal.contains("noisy"));
+        assert_eq!(output.stdout, "ok");
+        assert_eq!(output.stderr, "noisy");
     }
 
     #[test]
