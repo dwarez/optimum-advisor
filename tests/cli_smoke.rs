@@ -19,6 +19,18 @@ fn run_without_hf_token(args: &[&str]) -> Output {
         .expect("failed to run optimum-advisor")
 }
 
+fn run_without_hf_token_or_hf_login(args: &[&str]) -> Output {
+    let empty_path =
+        std::env::temp_dir().join(format!("optimum-advisor-empty-path-{}", std::process::id()));
+    fs::create_dir_all(&empty_path).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_optimum-advisor"))
+        .args(args)
+        .env_remove("HF_TOKEN")
+        .env("PATH", empty_path)
+        .output()
+        .expect("failed to run optimum-advisor")
+}
+
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
@@ -130,7 +142,7 @@ fn bench_dry_run_accepts_full_config_file() {
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stdout(&output);
     assert!(!text.contains("trial:"));
-    assert!(text.contains("--tensor-parallel-size 2"));
+    assert!(text.contains("--tensor-parallel-size 1"));
     assert!(text.contains("--gpu-memory-utilization 0.90"));
     assert!(text.contains("Qwen/Qwen3-4B-Instruct-2507"));
     assert!(text.contains("correctness_suite: id=oa-fast-v1"));
@@ -183,6 +195,26 @@ fn bench_execute_requires_hf_token() {
 
     assert!(!output.status.success());
     assert!(stderr(&output).contains("HF_TOKEN is required"));
+}
+
+#[test]
+fn leaderboard_submit_requires_hf_login_before_hf_token() {
+    let output = run_without_hf_token_or_hf_login(&[
+        "bench",
+        "--engine",
+        "vllm",
+        "--model",
+        "m",
+        "--leaderboard-submit",
+    ]);
+
+    assert!(!output.status.success());
+    let err = stderr(&output);
+    assert!(
+        err.contains("leaderboard submit requires Hugging Face login"),
+        "{err}"
+    );
+    assert!(!err.contains("HF_TOKEN is required"), "{err}");
 }
 
 #[test]

@@ -12,12 +12,15 @@ use crate::correctness::{
 };
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
+use crate::leaderboard::{prepare_submission, submit_report_file, PreparedLeaderboardSubmission};
 use crate::logs::classify_log;
 use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
 use crate::results::{
     create_run_dir, write_best_config, write_config_file, write_report, ResultSet, TrialResult,
 };
-use crate::runner::{execute_run_plan_with_correctness, execute_server_plan};
+use crate::runner::{
+    execute_run_plan_with_correctness, execute_server_plan, resolve_docker_image_tag,
+};
 use crate::serve::EngineArg;
 use crate::terminal;
 use crate::Result;
@@ -142,7 +145,7 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
-    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    let mut config = ServingConfig::from_setup_and_candidate(setup, candidate);
     if !setup.execute {
         if setup.validate_params {
             validate_serving_configs_from_cache(setup, adapter, std::slice::from_ref(&config))?;
@@ -151,6 +154,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
 
+    let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
     ensure_hf_token()?;
     ensure_lighteval_suite_ready(default_suite())?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
@@ -181,6 +185,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             .ok_or("correctness execution did not produce output")?,
     )?;
     log_correctness(out, &correctness)?;
+    record_resolved_image(&mut config, out)?;
     let result = TrialResult::new(
         config,
         setup.metric,
@@ -209,6 +214,7 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             config_file.display()
         ),
     )?;
+    maybe_submit_leaderboard(leaderboard_submission.as_ref(), &report_file, out)?;
     Ok(())
 }
 
@@ -222,6 +228,7 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         print_run_plans(adapter, &configs, out)?;
         return Ok(());
     }
+    let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
     ensure_hf_token()?;
     ensure_lighteval_suite_ready(default_suite())?;
     let first_config = configs
@@ -249,7 +256,7 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
 
-    for (index, config) in configs.into_iter().enumerate() {
+    for (index, mut config) in configs.into_iter().enumerate() {
         terminal::info(
             out,
             "trial",
@@ -274,6 +281,7 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
                 .ok_or("correctness execution did not produce output")?,
         )?;
         log_correctness(out, &correctness)?;
+        record_resolved_image(&mut config, out)?;
         let result = TrialResult::new(
             config,
             setup.metric,
@@ -315,7 +323,51 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             best_config.display(),
         ),
     )?;
+    maybe_submit_leaderboard(leaderboard_submission.as_ref(), &report_file, out)?;
     Ok(())
+}
+
+fn maybe_submit_leaderboard(
+    submission: Option<&PreparedLeaderboardSubmission>,
+    report_file: &Path,
+    out: &mut impl Write,
+) -> Result<()> {
+    let Some(submission) = submission else {
+        return Ok(());
+    };
+    terminal::info(
+        out,
+        "leaderbd",
+        format!(
+            "submitting report={} url={}",
+            report_file.display(),
+            submission.url()
+        ),
+    )?;
+    let result = submit_report_file(report_file, submission)?;
+    terminal::ok(out, "leaderbd", result.message)?;
+    Ok(())
+}
+
+fn record_resolved_image(config: &mut ServingConfig, out: &mut impl Write) -> Result<()> {
+    config.resolved_image = resolve_docker_image_tag(&config.image, engine_version_package(config));
+    if let Some(resolved) = &config.resolved_image {
+        terminal::info(out, "image", format!("resolved={resolved}"))?;
+    } else {
+        terminal::info(
+            out,
+            "image",
+            format!("resolved=unavailable image={}", config.image),
+        )?;
+    }
+    Ok(())
+}
+
+fn engine_version_package(config: &ServingConfig) -> Option<&'static str> {
+    match config.engine {
+        crate::engine::Engine::Vllm => Some("vllm"),
+        crate::engine::Engine::Sglang => Some("sglang"),
+    }
 }
 
 fn benchmark_configs(setup: &crate::cli::Setup, adapter: &dyn EngineAdapter) -> Vec<ServingConfig> {

@@ -216,6 +216,7 @@ mod tests {
         ServingConfig {
             engine: Engine::Vllm,
             image: "vllm/vllm-openai:latest".to_string(),
+            resolved_image: None,
             model: "Qwen/Qwen3-4B-Instruct-2507".to_string(),
             gpus: 1,
             host: "127.0.0.1".to_string(),

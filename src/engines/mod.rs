@@ -101,6 +101,7 @@ mod tests {
     use crate::cli::Setup;
     use crate::config::{BenchmarkConfig, ServingConfig};
     use crate::engine::{Metric, Mode};
+    use crate::leaderboard::LeaderboardConfig;
     use crate::serve::EngineArg;
     use crate::trial::Candidate;
 
@@ -129,6 +130,7 @@ mod tests {
             serve_sweep: crate::serve::ServingParamSweep::default(),
             serve_args: Vec::new(),
             benchmark: BenchmarkConfig::default(),
+            leaderboard: LeaderboardConfig::default(),
         }
     }
 

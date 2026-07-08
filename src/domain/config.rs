@@ -7,6 +7,7 @@ use crate::trial::Candidate;
 pub struct ServingConfig {
     pub engine: Engine,
     pub image: String,
+    pub resolved_image: Option<String>,
     pub model: String,
     pub gpus: usize,
     pub host: String,
@@ -50,6 +51,7 @@ impl ServingConfig {
                 .image
                 .clone()
                 .unwrap_or_else(|| setup.engine.default_image().to_string()),
+            resolved_image: None,
             model: setup.model.clone(),
             gpus: setup.gpus,
             host: setup.host.clone(),

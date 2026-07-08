@@ -123,6 +123,104 @@ pub fn execute_process(
     run_child(label, spec, &mut out)
 }
 
+pub fn resolve_docker_image_tag(image: &str, version_package: Option<&str>) -> Option<String> {
+    if image.contains('@') {
+        return None;
+    }
+    if !uses_latest_tag(image) {
+        return Some(image.to_string());
+    }
+    let repo = image_repo(image)?;
+    if let Some(tag) =
+        inspect_repo_tags(image).and_then(|tags| parse_resolved_image_tag(&tags, repo))
+    {
+        return Some(tag);
+    }
+    version_package
+        .and_then(|package| inspect_python_package_version(image, package))
+        .map(|version| version_to_image_tag(repo, &version))
+}
+
+fn inspect_repo_tags(image: &str) -> Option<String> {
+    let output = Command::new("docker")
+        .args([
+            "image",
+            "inspect",
+            image,
+            "--format",
+            "{{range .RepoTags}}{{println .}}{{end}}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn inspect_python_package_version(image: &str, package: &str) -> Option<String> {
+    let script = format!("import importlib.metadata as m; print(m.version({package:?}))");
+    let output = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "python3",
+            image,
+            "-c",
+            &script,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_resolved_image_tag(text: &str, repo: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .find(|tag| image_repo(tag) == Some(repo) && !uses_latest_tag(tag))
+        .map(str::to_string)
+}
+
+fn version_to_image_tag(repo: &str, version: &str) -> String {
+    format!("{repo}:v{}", version.trim_start_matches('v'))
+}
+
+fn uses_latest_tag(image: &str) -> bool {
+    image_tag(image).map(|tag| tag == "latest").unwrap_or(true)
+}
+
+fn image_repo(image: &str) -> Option<&str> {
+    let image = image.split_once('@').map(|(repo, _)| repo).unwrap_or(image);
+    let slash = image.rfind('/');
+    let colon = image.rfind(':');
+    if colon.is_some_and(|index| slash.map(|slash| index > slash).unwrap_or(true)) {
+        return colon.map(|index| &image[..index]);
+    }
+    Some(image)
+}
+
+fn image_tag(image: &str) -> Option<&str> {
+    if image.contains('@') {
+        return None;
+    }
+    let slash = image.rfind('/');
+    let colon = image.rfind(':')?;
+    if slash.map(|slash| colon < slash).unwrap_or(false) {
+        return None;
+    }
+    Some(&image[colon + 1..])
+}
+
 fn run_child(label: &str, spec: &ProcessSpec, out: &mut impl Write) -> Result<BenchmarkRunOutput> {
     terminal::info(out, label, "running")?;
     let output = Command::new(&spec.program)
@@ -528,5 +626,31 @@ mod tests {
         assert!(!message.contains("out0"));
         assert!(message.contains("out49"));
         assert!(message.contains("err"));
+    }
+
+    #[test]
+    fn parses_resolved_docker_image_tag() {
+        let text = "vllm/vllm-openai:latest\nvllm/vllm-openai:v0.22.0\n";
+
+        assert_eq!(
+            parse_resolved_image_tag(text, "vllm/vllm-openai"),
+            Some("vllm/vllm-openai:v0.22.0".to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_digest_when_resolving_human_image_tag() {
+        assert_eq!(
+            parse_resolved_image_tag("vllm/vllm-openai@sha256:abc123\n", "vllm/vllm-openai"),
+            None
+        );
+    }
+
+    #[test]
+    fn builds_version_tag_from_package_version() {
+        assert_eq!(
+            version_to_image_tag("vllm/vllm-openai", "0.22.0"),
+            "vllm/vllm-openai:v0.22.0"
+        );
     }
 }
