@@ -1,7 +1,7 @@
 use std::fmt;
 use std::fs;
 use std::io::Write as IoWrite;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use crate::Result;
@@ -68,10 +68,11 @@ pub struct LeaderboardSubmission {
     pub message: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct PreparedLeaderboardSubmission {
     config: LeaderboardConfig,
     contributor: String,
+    hf_token: Option<String>,
 }
 
 impl PreparedLeaderboardSubmission {
@@ -80,23 +81,50 @@ impl PreparedLeaderboardSubmission {
     }
 }
 
+impl fmt::Debug for PreparedLeaderboardSubmission {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PreparedLeaderboardSubmission")
+            .field("config", &self.config)
+            .field("contributor", &self.contributor)
+            .field(
+                "hf_token",
+                &if self.hf_token.is_some() {
+                    "<redacted>"
+                } else {
+                    "<empty>"
+                },
+            )
+            .finish()
+    }
+}
+
 pub fn prepare_submission(
     config: &LeaderboardConfig,
 ) -> Result<Option<PreparedLeaderboardSubmission>> {
-    prepare_submission_with(config, infer_hf_username)
+    prepare_submission_with(config, infer_hf_username, infer_hf_token)
 }
 
 fn prepare_submission_with(
     config: &LeaderboardConfig,
     infer_username: impl FnOnce() -> Result<String>,
+    infer_token: impl FnOnce() -> Result<String>,
 ) -> Result<Option<PreparedLeaderboardSubmission>> {
     if !config.submit {
         return Ok(None);
     }
 
+    let contributor = infer_username()?;
+    let hf_token = match infer_token() {
+        Ok(token) => Some(token),
+        Err(error) if config.submit_key.is_empty() => return Err(error),
+        Err(_) => None,
+    };
+
     Ok(Some(PreparedLeaderboardSubmission {
         config: config.clone(),
-        contributor: infer_username()?,
+        contributor,
+        hf_token,
     }))
 }
 
@@ -119,22 +147,27 @@ fn submit_report_json(
         &submission.config.submit_key,
     );
     let post_url = submit_url(&submission.config.url);
-    let post = run_curl(
-        &[
-            "-sS",
-            "-X",
-            "POST",
-            &post_url,
-            "-H",
-            "Content-Type: application/json",
-            "--data-binary",
-            "@-",
-        ],
-        Some(&payload),
-    )?;
+    let auth_header = authorization_header(submission.hf_token.as_deref());
+    let mut post_args = vec![
+        "-sS",
+        "-X",
+        "POST",
+        &post_url,
+        "-H",
+        "Content-Type: application/json",
+    ];
+    if let Some(header) = auth_header.as_deref() {
+        post_args.extend(["-H", header]);
+    }
+    post_args.extend(["--data-binary", "@-"]);
+    let post = run_curl(&post_args, Some(&payload))?;
     let event_id = parse_event_id(&post)?;
     let stream_url = format!("{post_url}/{event_id}");
-    let stream = run_curl(&["-sS", "-N", &stream_url], None)?;
+    let mut stream_args = vec!["-sS", "-N", &stream_url];
+    if let Some(header) = auth_header.as_deref() {
+        stream_args.extend(["-H", header]);
+    }
+    let stream = run_curl(&stream_args, None)?;
     parse_submit_stream(&stream)
 }
 
@@ -174,6 +207,63 @@ fn parse_whoami_username(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn infer_hf_token() -> Result<String> {
+    for name in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
+        if let Some(token) = clean_token(std::env::var(name).ok().as_deref()) {
+            return Ok(token);
+        }
+    }
+    for (command, args) in [
+        ("hf", &["auth", "token"][..]),
+        ("huggingface-cli", &["token"][..]),
+    ] {
+        if let Ok(output) = Command::new(command).args(args).output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if let Some(token) = clean_token(Some(&stdout)) {
+                    return Ok(token);
+                }
+            }
+        }
+    }
+    for path in hf_token_paths() {
+        if let Ok(token) = fs::read_to_string(path) {
+            if let Some(token) = clean_token(Some(&token)) {
+                return Ok(token);
+            }
+        }
+    }
+    Err("leaderboard submit requires a Hugging Face token; run `hf auth login`".to_string())
+}
+
+fn hf_token_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(path) = std::env::var("HF_TOKEN_PATH") {
+        paths.push(PathBuf::from(path));
+    }
+    if let Ok(home) = std::env::var("HF_HOME") {
+        paths.push(PathBuf::from(home).join("token"));
+    }
+    if let Ok(cache) = std::env::var("XDG_CACHE_HOME") {
+        paths.push(PathBuf::from(cache).join("huggingface").join("token"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(PathBuf::from(home).join(".cache/huggingface/token"));
+    }
+    paths
+}
+
+fn clean_token(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+fn authorization_header(token: Option<&str>) -> Option<String> {
+    clean_token(token).map(|token| format!("Authorization: Bearer {token}"))
 }
 
 fn run_curl(args: &[&str], stdin: Option<&str>) -> Result<String> {
@@ -336,6 +426,15 @@ mod tests {
     }
 
     #[test]
+    fn authorization_header_uses_bearer_token() {
+        assert_eq!(
+            authorization_header(Some("hf_test")).as_deref(),
+            Some("Authorization: Bearer hf_test")
+        );
+        assert_eq!(authorization_header(Some(" ")), None);
+    }
+
+    #[test]
     fn submit_url_uses_gradio_api_mount() {
         assert_eq!(
             submit_url("https://example.test/"),
@@ -401,9 +500,11 @@ mod tests {
 
     #[test]
     fn prepare_skips_login_when_submit_disabled() {
-        let prepared = prepare_submission_with(&LeaderboardConfig::default(), || {
-            panic!("disabled submissions must not inspect HF login")
-        })
+        let prepared = prepare_submission_with(
+            &LeaderboardConfig::default(),
+            || panic!("disabled submissions must not inspect HF login"),
+            || panic!("disabled submissions must not inspect HF token"),
+        )
         .unwrap();
 
         assert!(prepared.is_none());
@@ -416,10 +517,51 @@ mod tests {
             ..Default::default()
         };
 
-        let err =
-            prepare_submission_with(&config, || Err("missing login".to_string())).unwrap_err();
+        let err = prepare_submission_with(
+            &config,
+            || Err("missing login".to_string()),
+            || panic!("login failure should stop before token lookup"),
+        )
+        .unwrap_err();
 
         assert_eq!(err, "missing login");
+    }
+
+    #[test]
+    fn prepare_requires_token_without_submit_key() {
+        let config = LeaderboardConfig {
+            submit: true,
+            ..Default::default()
+        };
+
+        let err = prepare_submission_with(
+            &config,
+            || Ok("hf-dwarez".to_string()),
+            || Err("missing token".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "missing token");
+    }
+
+    #[test]
+    fn debug_redacts_hf_token() {
+        let config = LeaderboardConfig {
+            submit: true,
+            ..Default::default()
+        };
+        let prepared = prepare_submission_with(
+            &config,
+            || Ok("hf-dwarez".to_string()),
+            || Ok("hf_secret".to_string()),
+        )
+        .unwrap()
+        .unwrap();
+
+        let debug = format!("{prepared:?}");
+
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("hf_secret"));
     }
 
     #[test]
