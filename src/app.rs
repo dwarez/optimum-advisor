@@ -439,14 +439,24 @@ fn metrics_line(result: &TrialResult) -> String {
 }
 
 fn log_correctness(out: &mut dyn Write, result: &CorrectnessResult) -> Result<()> {
+    let scores = result
+        .tasks
+        .iter()
+        .map(|task| {
+            let metric = task.metric.as_deref().unwrap_or("unknown");
+            let score = task
+                .score
+                .map(|score| format!("{score:.4}"))
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("{}:{}={}", task.spec, metric, score)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     let message = format!(
-        "status={} score={} threshold={:.2} artifacts={}",
+        "status={} threshold={:.2} scores=[{}] artifacts={}",
         result.status.as_str(),
-        result
-            .score
-            .map(|score| format!("{score:.4}"))
-            .unwrap_or_else(|| "unknown".to_string()),
         result.threshold,
+        scores,
         result.artifacts.len()
     );
     if result.status == crate::correctness::CorrectnessStatus::Passed {

@@ -369,7 +369,6 @@ fn correctness_json(result: &CorrectnessResult) -> String {
     object(vec![
         ("suite_id", json_string(&result.suite_id)),
         ("status", json_string(result.status.as_str())),
-        ("score", opt_f64(result.score)),
         ("threshold", result.threshold.to_string()),
         ("max_samples", result.max_samples.to_string()),
         (
@@ -400,6 +399,7 @@ fn correctness_task_json(task: &crate::correctness::CorrectnessTaskResult) -> St
     object(vec![
         ("domain", json_string(&task.domain)),
         ("spec", json_string(&task.spec)),
+        ("metric", opt_string(task.metric.as_deref())),
         ("score", opt_f64(task.score)),
     ])
 }
@@ -790,12 +790,12 @@ mod tests {
         CorrectnessResult {
             suite_id: "oa-fast-v1".to_string(),
             status,
-            score,
-            threshold: 0.6,
+            threshold: 0.2,
             max_samples: 20,
             tasks: vec![CorrectnessTaskResult {
                 domain: "math".to_string(),
                 spec: "gsm8k|0".to_string(),
+                metric: Some("em".to_string()),
                 score,
             }],
             artifacts: vec![CorrectnessArtifact {
@@ -1040,6 +1040,7 @@ Max ITL (ms):                            30.00",
         assert!(text.contains("\"correctness\""));
         assert!(text.contains("\"suite_id\":\"oa-fast-v1\""));
         assert!(text.contains("\"status\":\"passed\""));
+        assert!(text.contains("\"metric\":\"em\""));
         assert!(text.contains("\"score\":1"));
         assert!(text.contains("\"artifacts\""));
         assert!(text.contains("\"benchmark_stderr\":\"stderr\\nline\""));

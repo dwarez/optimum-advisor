@@ -144,6 +144,7 @@ Convenience artifacts:
 
 - `config.conf`: runnable config produced by `bench`
 - `best.conf`: runnable best config produced by `sweep`
+- `correctness/responses.json`: per-sample correctness prompts, responses, and metrics when correctness details are available
 
 ## Current Scope
 

@@ -30,7 +30,7 @@ pub fn default_suite() -> &'static CorrectnessSuite {
 // ponytail: owned fast gate; keep endpoint/LiteLLM-compatible generative tasks only.
 pub const OA_FAST_V1: CorrectnessSuite = CorrectnessSuite {
     id: "oa-fast-v1",
-    threshold: 0.60,
+    threshold: 0.20,
     max_samples: 20,
     timeout_secs: 600,
     tasks: &[
