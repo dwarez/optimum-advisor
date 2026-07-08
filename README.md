@@ -43,6 +43,7 @@ cargo uninstall optimum-advisor
 - Docker
 - NVIDIA runtime for GPU execution (`docker run --gpus ...`)
 - `HF_TOKEN` for benchmark execution
+- correctness env: `./scripts/setup-correctness-env.sh`
 - Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
 
 ## Quick Start
@@ -125,7 +126,8 @@ optimum-advisor hardware
 ```
 
 `bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
-pair per candidate without starting containers.
+pair per candidate without starting containers. Dry-runs also show the owned
+lighteval endpoint correctness suite that runs against the same server.
 
 ## Results
 
@@ -135,7 +137,8 @@ Each execution writes a directory under `.optimum-advisor/results` unless
 Main artifact:
 
 - `report.json`: source of truth with hardware, model-memory estimate, tested
-  configs, benchmark metrics, stdout, stderr, winning metric, and best trial
+  configs, benchmark metrics, correctness results, stdout, stderr, winning
+  metric, and best trial
 
 Convenience artifacts:
 
@@ -152,12 +155,13 @@ Implemented:
 - Docker lifecycle cleanup for owned server containers
 - hardware detection through `nvidia-smi`
 - optional model-memory estimation through `hf-mem`
+- owned lighteval endpoint correctness suite captured in `report.json`
 - structured benchmark reports and basic best-result selection
 
 Still missing:
 
-- endpoint-based correctness checks against the same served engine/config
 - failure-tolerant sweeps that record bad/OOM candidates instead of aborting
+- baseline-vs-candidate correctness degradation scoring
 - advisor heuristics using hardware and model-memory budgets
 - richer constraints such as latency ceilings and minimum throughput
 - stronger SGLang parameter introspection

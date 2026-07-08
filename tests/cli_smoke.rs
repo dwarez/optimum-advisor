@@ -133,6 +133,9 @@ fn bench_dry_run_accepts_full_config_file() {
     assert!(text.contains("--tensor-parallel-size 2"));
     assert!(text.contains("--gpu-memory-utilization 0.90"));
     assert!(text.contains("Qwen/Qwen3-4B-Instruct-2507"));
+    assert!(text.contains("correctness_suite: id=oa-fast-v1"));
+    assert!(text.contains("correctness: lighteval endpoint litellm"));
+    assert!(text.contains("base_url=http://127.0.0.1:8000/v1"));
 }
 
 #[test]
