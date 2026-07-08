@@ -172,6 +172,12 @@ fn submit_report_json(
 }
 
 fn infer_hf_username() -> Result<String> {
+    if let Ok(token) = infer_hf_token_from_env_or_file() {
+        if let Ok(username) = infer_hf_username_from_token(&token) {
+            return Ok(username);
+        }
+    }
+
     for (command, args) in [
         ("hf", &["auth", "whoami"][..]),
         ("huggingface-cli", &["whoami"][..]),
@@ -191,6 +197,20 @@ fn infer_hf_username() -> Result<String> {
         "leaderboard submit requires Hugging Face login; run `hf auth login` or `huggingface-cli login`"
             .to_string(),
     )
+}
+
+fn infer_hf_username_from_token(token: &str) -> Result<String> {
+    let header = authorization_header(Some(token)).ok_or("empty Hugging Face token")?;
+    let body = run_curl(
+        &["-sS", "-H", &header, "https://huggingface.co/api/whoami-v2"],
+        None,
+    )?;
+    parse_whoami_api_username(&body)
+        .ok_or_else(|| "Hugging Face whoami response did not include a username".to_string())
+}
+
+fn parse_whoami_api_username(text: &str) -> Option<String> {
+    json_string_field(text, "name").filter(|name| !name.is_empty())
 }
 
 fn parse_whoami_username(text: &str) -> Option<String> {
@@ -234,11 +254,10 @@ fn parse_whoami_username(text: &str) -> Option<String> {
 }
 
 fn infer_hf_token() -> Result<String> {
-    for name in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
-        if let Some(token) = clean_token(std::env::var(name).ok().as_deref()) {
-            return Ok(token);
-        }
+    if let Ok(token) = infer_hf_token_from_env_or_file() {
+        return Ok(token);
     }
+
     for (command, args) in [
         ("hf", &["auth", "token"][..]),
         ("huggingface-cli", &["token"][..]),
@@ -252,6 +271,15 @@ fn infer_hf_token() -> Result<String> {
             }
         }
     }
+    Err("leaderboard submit requires a Hugging Face token; run `hf auth login`".to_string())
+}
+
+fn infer_hf_token_from_env_or_file() -> Result<String> {
+    for name in ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"] {
+        if let Some(token) = clean_token(std::env::var(name).ok().as_deref()) {
+            return Ok(token);
+        }
+    }
     for path in hf_token_paths() {
         if let Ok(token) = fs::read_to_string(path) {
             if let Some(token) = clean_token(Some(&token)) {
@@ -259,7 +287,7 @@ fn infer_hf_token() -> Result<String> {
             }
         }
     }
-    Err("leaderboard submit requires a Hugging Face token; run `hf auth login`".to_string())
+    Err("missing Hugging Face token".to_string())
 }
 
 fn hf_token_paths() -> Vec<PathBuf> {
@@ -524,6 +552,14 @@ mod tests {
             Some("hf-dwarez".to_string())
         );
         assert_eq!(parse_whoami_username("Not logged in"), None);
+    }
+
+    #[test]
+    fn parses_hf_api_username() {
+        assert_eq!(
+            parse_whoami_api_username("{\"type\":\"user\",\"name\":\"hf-dwarez\"}"),
+            Some("hf-dwarez".to_string())
+        );
     }
 
     #[test]
