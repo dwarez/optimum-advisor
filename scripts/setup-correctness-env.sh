@@ -24,14 +24,12 @@ VIRTUAL_ENV="$venv_dir"
 PATH="$venv_dir/bin:$PATH"
 export VIRTUAL_ENV PATH
 
-log 'running: uv pip install lighteval==0.13.0 litellm[caching]==1.66.0 diskcache==5.6.3 langdetect==1.0.9 click==8.1.8 typer==0.16.0'
+log 'running: uv pip install lighteval==0.13.0 litellm==1.66.0 diskcache==5.6.3 langdetect==1.0.9'
 uv pip install \
   "lighteval==0.13.0" \
-  "litellm[caching]==1.66.0" \
+  "litellm==1.66.0" \
   "diskcache==5.6.3" \
-  "langdetect==1.0.9" \
-  "click==8.1.8" \
-  "typer==0.16.0"
+  "langdetect==1.0.9"
 
 log "verifying imports"
 python -c "import diskcache, langdetect, lighteval, litellm"
