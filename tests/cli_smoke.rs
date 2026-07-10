@@ -82,7 +82,7 @@ fn params_dry_run_prints_container_inspection_command() {
     assert!(text.contains("inspect: docker run"));
     assert!(text.contains("--gpus all"));
     assert!(text.contains("--entrypoint python3"));
-    assert!(text.contains("sglang.launch_server --help"));
+    assert!(text.contains("ServerArgs.add_cli_args"));
     assert!(text.contains("source: runtime only"));
 }
 
@@ -148,6 +148,26 @@ fn bench_dry_run_accepts_full_config_file() {
     assert!(text.contains("correctness_suite: id=oa-fast-v1"));
     assert!(text.contains("correctness: lighteval endpoint litellm"));
     assert!(text.contains("base_url=http://127.0.0.1:8000/v1"));
+}
+
+#[test]
+fn bench_dry_run_accepts_sglang_config_file() {
+    let output = run(&[
+        "bench",
+        "--config",
+        "examples/sglang-bench.conf",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("sglang.launch_server"));
+    assert!(text.contains("sglang.bench_serving"));
+    assert!(text.contains("--tp-size 1"));
+    assert!(text.contains("--mem-fraction-static 0.88"));
+    assert!(text.contains("--chunked-prefill-size 8192"));
+    assert!(text.contains("--random-input-len 1024"));
+    assert!(text.contains("--random-output-len 128"));
 }
 
 #[test]

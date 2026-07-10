@@ -52,6 +52,7 @@ Dry-run a single benchmark command:
 
 ```bash
 cargo run -- bench --config examples/bench.conf --dry-run
+cargo run -- bench --config examples/sglang-bench.conf --dry-run
 ```
 
 Run a sweep on a GPU host:
@@ -203,5 +204,4 @@ Still missing:
 - baseline-vs-candidate correctness degradation scoring
 - advisor heuristics using hardware and model-memory budgets
 - richer constraints such as latency ceilings and minimum throughput
-- stronger SGLang parameter introspection
 - broader CUDA-host integration coverage
