@@ -8,14 +8,16 @@ use crate::advisor::hardware::{detect_hardware, HardwareProfile};
 use crate::advisor::model_memory::{estimate_model_memory, ModelMemoryEstimate};
 use crate::config::ServingConfig;
 use crate::correctness::{
-    collect_lighteval_result, default_suite, ensure_lighteval_suite_ready, lighteval_plan,
-    CorrectnessResult,
+    capability_probe_plan, collect_lighteval_result, default_suite, ensure_lighteval_suite_ready,
+    lighteval_plan, CorrectnessResult,
 };
 use crate::engine::Engine;
 use crate::engines::adapter_for;
 use crate::params::{load_or_inspect, ParameterSchema};
 use crate::results::{BenchmarkMetrics, TrialResult};
-use crate::runner::{execute_evaluation_plan, resolve_docker_image_tag, BenchmarkRunOutput};
+use crate::runner::{
+    execute_evaluation_plan_with_probe, resolve_docker_image_tag, BenchmarkRunOutput,
+};
 use crate::serve::EngineArg;
 use crate::Result;
 
@@ -218,9 +220,15 @@ pub fn evaluate_candidate(
         .checks
         .correctness
         .then(|| lighteval_plan(&config, &correctness_dir));
+    let capability_probe = options
+        .checks
+        .correctness
+        .then(|| capability_probe_plan(&config, &correctness_dir))
+        .flatten();
     let plan = adapter.run_plan(&config);
-    let output = execute_evaluation_plan(
+    let output = execute_evaluation_plan_with_probe(
         &plan,
+        capability_probe.as_ref(),
         correctness_plan.as_ref(),
         options.checks.benchmark,
         &mut out,
@@ -264,7 +272,10 @@ fn benchmark_parts(
 }
 
 fn stage_for_runtime_error(error: &str) -> EvaluationStage {
-    if error.starts_with("correct ") || error.starts_with("failed to start correct") {
+    if error.starts_with("correct ")
+        || error.starts_with("correctness probe ")
+        || error.starts_with("failed to start correct")
+    {
         EvaluationStage::Correctness
     } else if error.starts_with("benchmark ") || error.starts_with("failed to start benchmark") {
         EvaluationStage::Benchmark

@@ -95,6 +95,16 @@ pub fn execute_evaluation_plan(
     run_benchmark: bool,
     mut out: impl Write,
 ) -> Result<EvaluationRunOutput> {
+    execute_evaluation_plan_with_probe(plan, None, correctness, run_benchmark, &mut out)
+}
+
+pub fn execute_evaluation_plan_with_probe(
+    plan: &RunPlan,
+    correctness_probe: Option<&ProcessSpec>,
+    correctness: Option<&ProcessSpec>,
+    run_benchmark: bool,
+    mut out: impl Write,
+) -> Result<EvaluationRunOutput> {
     if correctness.is_none() && !run_benchmark {
         return Err("evaluation requires correctness, benchmark, or both".to_string());
     }
@@ -115,6 +125,9 @@ pub fn execute_evaluation_plan(
     let result = (|| {
         wait_for_readiness(&plan.readiness, &mut server)?;
         terminal::ok(&mut out, "server", "ready")?;
+        if let Some(spec) = correctness_probe {
+            run_child("correctness probe", spec, &mut out)?;
+        }
         let correctness = correctness
             .map(|spec| run_child("correct", spec, &mut out))
             .transpose()?;
@@ -656,6 +669,80 @@ mod tests {
 
         assert_eq!(output.correctness.unwrap().stdout, "ok");
         assert!(output.benchmark.is_none());
+    }
+
+    #[test]
+    fn evaluation_plan_runs_parser_probe_before_correctness() {
+        if Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind test listener: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let marker = std::env::temp_dir().join(format!(
+            "optimum-advisor-parser-probe-order-{}",
+            std::process::id()
+        ));
+        let plan = RunPlan {
+            server: ProcessSpec::new(
+                "python3",
+                vec![
+                    "-m".to_string(),
+                    "http.server".to_string(),
+                    port.to_string(),
+                    "--bind".to_string(),
+                    "127.0.0.1".to_string(),
+                ],
+            ),
+            benchmark: ProcessSpec::new("sh", vec!["-c".to_string(), "exit 99".to_string()]),
+            readiness: Readiness {
+                host: "127.0.0.1".to_string(),
+                port,
+                timeout: Duration::from_secs(5),
+                http_path: None,
+            },
+            server_container: None,
+        };
+        let probe = ProcessSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                "printf ready > \"$1\"".to_string(),
+                "sh".to_string(),
+                marker.display().to_string(),
+            ],
+        );
+        let correctness = ProcessSpec::new(
+            "sh",
+            vec![
+                "-c".to_string(),
+                "test \"$(cat \"$1\")\" = ready && printf ok".to_string(),
+                "sh".to_string(),
+                marker.display().to_string(),
+            ],
+        );
+
+        let output = execute_evaluation_plan_with_probe(
+            &plan,
+            Some(&probe),
+            Some(&correctness),
+            false,
+            Vec::new(),
+        )
+        .unwrap();
+
+        let _ = std::fs::remove_file(marker);
+        assert_eq!(output.correctness.unwrap().stdout, "ok");
     }
 
     #[test]

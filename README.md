@@ -131,6 +131,10 @@ optimum-advisor mcp
 pair per candidate without starting containers. Dry-runs also show the owned
 lighteval endpoint correctness suite that runs against the same server.
 
+When serving args configure `--tool-call-parser` or `--reasoning-parser`, the
+correctness stage also sends OpenAI chat-completion probes that verify parsed
+tool calls and separated reasoning output. Probe failures fail correctness.
+
 ## Agent Tools and MCP
 
 `optimum-advisor mcp` starts a local MCP server over stdio. The MCP server and
@@ -221,6 +225,7 @@ Convenience artifacts:
 - `config.conf`: runnable config produced by `bench`
 - `best.conf`: runnable best config produced by `sweep`
 - `correctness/responses.json`: per-sample correctness prompts, responses, and metrics when correctness details are available
+- `correctness/capabilities.json`: configured tool-calling and reasoning parser probe results
 
 ## Current Scope
 

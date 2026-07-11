@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ServingConfig;
 use crate::runner::{BenchmarkRunOutput, ProcessSpec};
@@ -66,6 +66,43 @@ impl CorrectnessStatus {
 
 pub fn lighteval_plan(config: &ServingConfig, output_dir: impl AsRef<Path>) -> ProcessSpec {
     lighteval_plan_for_suite(default_suite(), config, output_dir)
+}
+
+pub fn capability_probe_plan(
+    config: &ServingConfig,
+    output_dir: impl AsRef<Path>,
+) -> Option<ProcessSpec> {
+    let tool_parser = serve_arg_value(config, "--tool-call-parser").unwrap_or_default();
+    let reasoning_parser = serve_arg_value(config, "--reasoning-parser").unwrap_or_default();
+    if tool_parser.is_empty() && reasoning_parser.is_empty() {
+        return None;
+    }
+
+    Some(ProcessSpec::new(
+        "python3",
+        vec![
+            "-c".to_string(),
+            CAPABILITY_PROBES_SCRIPT.to_string(),
+            format!("http://{}:{}/v1", config.host, config.port),
+            config.model.clone(),
+            output_dir
+                .as_ref()
+                .join("capabilities.json")
+                .display()
+                .to_string(),
+            tool_parser.to_string(),
+            reasoning_parser.to_string(),
+        ],
+    ))
+}
+
+fn serve_arg_value<'a>(config: &'a ServingConfig, name: &str) -> Option<&'a str> {
+    config
+        .serve_args
+        .iter()
+        .rev()
+        .find(|arg| arg.name == name)
+        .and_then(|arg| arg.value.as_deref())
 }
 
 pub fn ensure_lighteval_suite_ready(suite: &CorrectnessSuite) -> Result<()> {
@@ -150,7 +187,7 @@ pub fn collect_lighteval_result(
     output: BenchmarkRunOutput,
 ) -> Result<CorrectnessResult> {
     let artifacts = collect_artifacts(output_dir.as_ref())?;
-    let tasks = suite
+    let mut tasks = suite
         .tasks
         .iter()
         .map(|task| {
@@ -165,6 +202,7 @@ pub fn collect_lighteval_result(
             }
         })
         .collect::<Vec<_>>();
+    tasks.extend(capability_task_results(&artifacts)?);
     let status = if tasks.is_empty() || tasks.iter().any(|task| task.score.is_none()) {
         CorrectnessStatus::Unknown
     } else if tasks
@@ -188,6 +226,45 @@ pub fn collect_lighteval_result(
         stdout: output.stdout,
         stderr: output.stderr,
     })
+}
+
+#[derive(Deserialize)]
+struct CapabilityProbeArtifact {
+    checks: Vec<CapabilityProbeResult>,
+}
+
+#[derive(Deserialize)]
+struct CapabilityProbeResult {
+    domain: String,
+    parser: String,
+    passed: bool,
+}
+
+fn capability_task_results(
+    artifacts: &[CorrectnessArtifact],
+) -> Result<Vec<CorrectnessTaskResult>> {
+    let parsed = artifacts
+        .iter()
+        .filter(|artifact| artifact.path.ends_with("capabilities.json"))
+        .map(|artifact| {
+            serde_json::from_str::<CapabilityProbeArtifact>(&artifact.json).map_err(|err| {
+                format!(
+                    "failed to parse capability probe artifact {}: {err}",
+                    artifact.path
+                )
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(parsed
+        .into_iter()
+        .flat_map(|artifact| artifact.checks)
+        .map(|check| CorrectnessTaskResult {
+            domain: check.domain.clone(),
+            spec: format!("{}:{}", check.domain, check.parser),
+            metric: Some("parser_probe".to_string()),
+            score: Some(if check.passed { 1.0 } else { 0.0 }),
+        })
+        .collect())
 }
 
 fn collect_artifacts(output_dir: &Path) -> Result<Vec<CorrectnessArtifact>> {
@@ -310,6 +387,101 @@ print(json.dumps({
 }, ensure_ascii=False))
 "#;
 
+const CAPABILITY_PROBES_SCRIPT: &str = r#"
+import json
+import sys
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+base_url, model, artifact_path, tool_parser, reasoning_parser = sys.argv[1:]
+checks = []
+
+def post(payload):
+    request = Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(payload).encode(),
+        headers={"Authorization": "Bearer EMPTY", "Content-Type": "application/json"},
+    )
+    try:
+        with urlopen(request, timeout=120) as response:
+            return json.load(response)
+    except HTTPError as error:
+        raise RuntimeError(f"HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+
+def run(domain, parser, probe):
+    try:
+        probe()
+        checks.append({"domain": domain, "parser": parser, "passed": True})
+    except Exception as error:
+        checks.append({
+            "domain": domain,
+            "parser": parser,
+            "passed": False,
+            "error": str(error),
+        })
+
+def tool_calling():
+    response = post({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": "Call get_temperature exactly once for Rome. Do not answer in text.",
+        }],
+        "tools": [{
+            "type": "function",
+            "function": {
+                "name": "get_temperature",
+                "description": "Get the current temperature for a city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                },
+            },
+        }],
+        "tool_choice": "auto",
+        "temperature": 0,
+        "max_tokens": 256,
+    })
+    calls = response["choices"][0]["message"].get("tool_calls") or []
+    assert len(calls) == 1, f"expected one parsed tool call, got {calls!r}"
+    function = calls[0]["function"]
+    assert function["name"] == "get_temperature", function
+    arguments = function["arguments"]
+    if isinstance(arguments, str):
+        arguments = json.loads(arguments)
+    assert isinstance(arguments.get("city"), str), arguments
+
+def reasoning():
+    response = post({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": "What is 17 multiplied by 19? Think step by step, then give the answer.",
+        }],
+        "temperature": 0,
+        "max_tokens": 256,
+    })
+    message = response["choices"][0]["message"]
+    reasoning = message.get("reasoning") or message.get("reasoning_content")
+    assert isinstance(reasoning, str) and reasoning.strip(), message
+    content = message.get("content") or ""
+    assert "<think>" not in content and "</think>" not in content, content
+
+if tool_parser:
+    run("tool_calling", tool_parser, tool_calling)
+if reasoning_parser:
+    run("reasoning", reasoning_parser, reasoning)
+
+path = Path(artifact_path)
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps({"schema_version": 1, "checks": checks}, indent=2))
+for check in checks:
+    if not check["passed"]:
+        print(f"{check['domain']} parser probe failed ({check['parser']}): {check['error']}", file=sys.stderr)
+"#;
+
 #[derive(Clone, Debug, PartialEq)]
 struct ExtractedMetric {
     name: String,
@@ -406,6 +578,7 @@ mod tests {
     use super::*;
     use crate::config::BenchmarkConfig;
     use crate::engine::{Engine, Metric};
+    use crate::serve::EngineArg;
     use crate::trial::Candidate;
 
     fn config() -> ServingConfig {
@@ -439,6 +612,54 @@ mod tests {
         assert!(plan.args.contains(&"--max-samples".to_string()));
         assert!(plan.args.contains(&default_suite().max_samples.to_string()));
         assert!(plan.args.contains(&"--save-details".to_string()));
+    }
+
+    #[test]
+    fn parser_probes_follow_configured_serving_args() {
+        let mut config = config();
+        assert!(capability_probe_plan(&config, "correctness").is_none());
+
+        config.serve_args = vec![
+            EngineArg::value("tool-call-parser", "hermes"),
+            EngineArg::value("reasoning-parser", "qwen3"),
+        ];
+        let plan = capability_probe_plan(&config, "correctness").unwrap();
+
+        assert_eq!(plan.program, "python3");
+        assert!(plan.args.contains(&"http://127.0.0.1:8000/v1".to_string()));
+        assert!(plan
+            .args
+            .contains(&"correctness/capabilities.json".to_string()));
+        assert!(plan.args.contains(&"hermes".to_string()));
+        assert!(plan.args.contains(&"qwen3".to_string()));
+    }
+
+    #[test]
+    fn embedded_parser_probe_script_is_runnable() {
+        let artifact = std::env::temp_dir().join(format!(
+            "optimum-advisor-parser-script-test-{}.json",
+            std::process::id()
+        ));
+        let Ok(output) = Command::new("python3")
+            .args([
+                "-c",
+                CAPABILITY_PROBES_SCRIPT,
+                "http://127.0.0.1:1/v1",
+                "model",
+                artifact.to_str().unwrap(),
+                "",
+                "",
+            ])
+            .output()
+        else {
+            return;
+        };
+
+        assert!(output.status.success());
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&artifact).unwrap()).unwrap();
+        let _ = std::fs::remove_file(artifact);
+        assert_eq!(value["checks"], serde_json::json!([]));
     }
 
     #[test]
@@ -569,5 +790,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(result.status, CorrectnessStatus::Failed);
+    }
+
+    #[test]
+    fn parser_probe_failures_fail_correctness() {
+        let dir = std::env::temp_dir().join(format!(
+            "optimum-advisor-parser-probe-test-{}",
+            std::process::id()
+        ));
+        let results_dir = dir.join("results/model");
+        std::fs::create_dir_all(&results_dir).unwrap();
+        std::fs::write(
+            results_dir.join("results_1.json"),
+            r#"{
+                "results": {
+                    "gsm8k|0": {"em": 1.0},
+                    "ifeval|0": {"prompt_level_strict_acc": 1.0},
+                    "triviaqa|0": {"em": 1.0},
+                    "drop|1": {"em": 1.0}
+                }
+            }"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("capabilities.json"),
+            r#"{
+                "schema_version": 1,
+                "checks": [{
+                    "domain": "tool_calling",
+                    "parser": "wrong_parser",
+                    "passed": false,
+                    "error": "expected one parsed tool call"
+                }]
+            }"#,
+        )
+        .unwrap();
+
+        let result = collect_lighteval_result(
+            default_suite(),
+            &dir,
+            BenchmarkRunOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.status, CorrectnessStatus::Failed);
+        assert!(result
+            .tasks
+            .iter()
+            .any(|task| { task.spec == "tool_calling:wrong_parser" && task.score == Some(0.0) }));
     }
 }
