@@ -1,6 +1,8 @@
+use serde::Serialize;
+
 use crate::Result;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct EngineArg {
     pub name: String,
     pub value: Option<String>,
@@ -80,13 +82,14 @@ impl ServingParamSweep {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ParamKind {
     Value,
     Flag,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ParameterSpec {
     pub canonical: String,
     pub cli: String,

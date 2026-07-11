@@ -2,6 +2,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde::Serialize;
+
 use crate::config::ServingConfig;
 use crate::runner::{BenchmarkRunOutput, ProcessSpec};
 use crate::Result;
@@ -10,7 +12,7 @@ mod suite;
 
 pub use suite::{default_suite, CorrectnessSuite, CorrectnessTask};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CorrectnessResult {
     pub suite_id: String,
     pub status: CorrectnessStatus,
@@ -22,7 +24,7 @@ pub struct CorrectnessResult {
     pub stderr: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CorrectnessTaskResult {
     pub domain: String,
     pub spec: String,
@@ -30,13 +32,14 @@ pub struct CorrectnessTaskResult {
     pub score: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CorrectnessArtifact {
     pub path: String,
     pub json: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CorrectnessStatus {
     Passed,
     Failed,

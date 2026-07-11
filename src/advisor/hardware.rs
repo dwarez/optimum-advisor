@@ -1,8 +1,10 @@
 use std::process::Command;
 
+use serde::Serialize;
+
 use crate::Result;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct HardwareProfile {
     pub source: String,
     pub cuda_visible_devices: Option<String>,
@@ -10,7 +12,7 @@ pub struct HardwareProfile {
     pub warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GpuInfo {
     pub index: u32,
     pub name: String,

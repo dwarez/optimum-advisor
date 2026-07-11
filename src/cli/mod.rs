@@ -297,6 +297,7 @@ fn usage() -> String {
   optimum-advisor plan --engine vllm|sglang --model MODEL [--gpus N] [--max-model-len N] [--metric tps|total_tps|req_s|ttft|p99_ttft|tpot|p99_tpot|itl|p99_itl|e2e|p99_e2e]
   optimum-advisor params --engine vllm|sglang [--image IMAGE] [--execute]
   optimum-advisor hardware
+  optimum-advisor mcp
   optimum-advisor serve --engine vllm|sglang --model MODEL [--gpus N] [--serve-arg NAME=VALUE] [--execute]
   optimum-advisor sweep --config PATH [--dry-run] [--leaderboard-submit]
   optimum-advisor bench --config PATH [--dry-run] [--leaderboard-submit]

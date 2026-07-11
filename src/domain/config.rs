@@ -1,9 +1,11 @@
+use serde::Serialize;
+
 use crate::cli::Setup;
 use crate::engine::{Engine, Metric};
 use crate::serve::EngineArg;
 use crate::trial::Candidate;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ServingConfig {
     pub engine: Engine,
     pub image: String,
@@ -20,7 +22,7 @@ pub struct ServingConfig {
     pub benchmark: BenchmarkConfig,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BenchmarkConfig {
     pub dataset_name: String,
     pub num_prompts: u32,
