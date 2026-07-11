@@ -2,27 +2,26 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use crate::advisor::hardware::{detect_hardware, format_hardware_profile, summarize_hardware};
-use crate::advisor::model_memory::{estimate_model_memory, summarize_model_memory};
+use crate::advisor::hardware::{format_hardware_profile, summarize_hardware};
+use crate::advisor::model_memory::summarize_model_memory;
 use crate::cli::parse_args;
 use crate::config::ServingConfig;
-use crate::correctness::{
-    collect_lighteval_result, default_suite, ensure_lighteval_suite_ready, lighteval_plan,
-    CorrectnessResult,
-};
+use crate::correctness::{default_suite, lighteval_plan, CorrectnessResult};
 use crate::engine::Mode;
 use crate::engines::{adapter_for, EngineAdapter};
 use crate::leaderboard::{prepare_submission, submit_report_file, PreparedLeaderboardSubmission};
 use crate::logs::classify_log;
-use crate::params::{inspect_command, load_cached_or_hint, load_or_inspect};
+use crate::params::{inspect_command, load_cached_or_hint};
 use crate::results::{
     create_run_dir, write_best_config, write_config_file, write_report, ResultSet, TrialResult,
 };
-use crate::runner::{
-    execute_run_plan_with_correctness, execute_server_plan, resolve_docker_image_tag,
-};
+use crate::runner::execute_server_plan;
 use crate::serve::EngineArg;
 use crate::terminal;
+use crate::tools::{
+    ensure_hf_token, estimate_memory, evaluate_candidate, inspect_engine, inspect_hardware,
+    preflight, validate_config, EvaluationChecks, EvaluationOptions,
+};
 use crate::Result;
 
 pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()> {
@@ -39,7 +38,7 @@ pub fn run(args: impl Iterator<Item = String>, mut out: impl Write) -> Result<()
 }
 
 fn print_hardware(out: &mut impl Write) -> Result<()> {
-    let profile = detect_hardware();
+    let profile = inspect_hardware();
     write!(out, "{}", format_hardware_profile(&profile)).map_err(write_error)
 }
 
@@ -48,21 +47,20 @@ fn print_plan(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let candidate = adapter.initial_candidate(setup);
     let config = ServingConfig::from_setup_and_candidate(setup, candidate);
     if setup.validate_params {
-        let schema = if setup.execute {
-            load_or_inspect(
-                adapter,
-                config.image.clone(),
+        if setup.execute {
+            validate_config(
+                &config,
                 Path::new(&setup.param_cache_dir),
                 setup.refresh_params,
-            )?
+            )?;
         } else {
-            load_cached_or_hint(
+            let schema = load_cached_or_hint(
                 adapter,
                 config.image.clone(),
                 Path::new(&setup.param_cache_dir),
-            )?
-        };
-        schema.validate_args(&adapter.serving_args(&config))?;
+            )?;
+            schema.validate_args(&adapter.serving_args(&config))?;
+        }
     }
     let plan = adapter.run_plan(&config);
     writeln!(out, "engine: {}", config.engine).map_err(write_error)?;
@@ -113,8 +111,8 @@ fn print_params(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     }
 
     writeln!(out, "inspecting image parameters: {image}").map_err(write_error)?;
-    let schema = load_or_inspect(
-        adapter,
+    let schema = inspect_engine(
+        setup.engine,
         image,
         Path::new(&setup.param_cache_dir),
         setup.refresh_params,
@@ -145,7 +143,7 @@ fn serve(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
 fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     let adapter = adapter_for(setup.engine);
     let candidate = adapter.initial_candidate(setup);
-    let mut config = ServingConfig::from_setup_and_candidate(setup, candidate);
+    let config = ServingConfig::from_setup_and_candidate(setup, candidate);
     if !setup.execute {
         if setup.validate_params {
             validate_serving_configs_from_cache(setup, adapter, std::slice::from_ref(&config))?;
@@ -155,10 +153,9 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
     }
 
     let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
-    ensure_hf_token()?;
-    ensure_lighteval_suite_ready(default_suite())?;
+    preflight(EvaluationChecks::ALL)?;
     let run_dir = create_run_dir(&setup.results_dir, "bench", setup.engine)?;
-    let hardware = detect_hardware();
+    let hardware = inspect_hardware();
     terminal::info(
         out,
         "model-mem",
@@ -167,34 +164,22 @@ fn bench_once(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
             config.model, config.max_model_len
         ),
     )?;
-    let model_memory = estimate_model_memory(&config);
+    let model_memory = estimate_memory(&config);
     terminal::info(out, "bench", describe_config(adapter, &config))?;
     terminal::info(out, "hardware", summarize_hardware(&hardware))?;
     terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
-    validate_serving_args(setup, &config)?;
-    let plan = adapter.run_plan(&config);
-    let correctness_dir = run_dir.join("correctness");
-    let correctness_plan = lighteval_plan(&config, &correctness_dir);
-    let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
-    let correctness = collect_lighteval_result(
-        default_suite(),
-        &correctness_dir,
-        output
-            .correctness
-            .ok_or("correctness execution did not produce output")?,
-    )?;
-    log_correctness(out, &correctness)?;
-    record_resolved_image(&mut config, out)?;
-    let result = TrialResult::new(
-        config,
-        setup.metric,
-        hardware,
-        model_memory,
-        output.benchmark.stdout,
-        output.benchmark.stderr,
-    )
-    .with_correctness(correctness);
+    let mut options = EvaluationOptions::new(&setup.param_cache_dir, &run_dir);
+    options.refresh_params = setup.refresh_params;
+    options.preflight = false;
+    options.hardware = Some(hardware);
+    options.model_memory = Some(model_memory);
+    let evaluation = evaluate_candidate(config, options, &mut *out).map_err(|err| err.message)?;
+    if let Some(correctness) = &evaluation.correctness {
+        log_correctness(out, correctness)?;
+    }
+    log_resolved_image(&evaluation.config, out)?;
+    let result = evaluation.into_trial_result()?;
     let mut results = ResultSet::new(setup.metric);
     results.push(result);
     let report_file = write_report(&run_dir, "bench", &results)?;
@@ -229,34 +214,20 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
         return Ok(());
     }
     let leaderboard_submission = prepare_submission(&setup.leaderboard)?;
-    ensure_hf_token()?;
-    ensure_lighteval_suite_ready(default_suite())?;
-    let first_config = configs
-        .first()
-        .ok_or("sweep produced no candidate configs")?;
+    preflight(EvaluationChecks::ALL)?;
     let mut results = ResultSet::new(setup.metric);
     let total = configs.len();
     let run_dir = create_run_dir(&setup.results_dir, "sweep", setup.engine)?;
-    let hardware = detect_hardware();
-    terminal::info(
-        out,
-        "model-mem",
-        format!(
-            "estimating model={} max_model_len={}",
-            first_config.model, first_config.max_model_len
-        ),
-    )?;
-    let model_memory = estimate_model_memory(first_config);
+    let hardware = inspect_hardware();
     terminal::info(
         out,
         "sweep",
         format!("{total} trial(s), optimizing {}", setup.metric),
     )?;
     terminal::info(out, "hardware", summarize_hardware(&hardware))?;
-    terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
     terminal::info(out, "results", format!("dir={}", run_dir.display()))?;
 
-    for (index, mut config) in configs.into_iter().enumerate() {
+    for (index, config) in configs.into_iter().enumerate() {
         terminal::info(
             out,
             "trial",
@@ -268,29 +239,21 @@ fn run_sweep(setup: &crate::cli::Setup, out: &mut impl Write) -> Result<()> {
                 describe_config(adapter, &config)
             ),
         )?;
-        validate_serving_args(setup, &config)?;
-        let plan = adapter.run_plan(&config);
-        let correctness_dir = run_dir.join(format!("trial-{}-correctness", index + 1));
-        let correctness_plan = lighteval_plan(&config, &correctness_dir);
-        let output = execute_run_plan_with_correctness(&plan, &correctness_plan, &mut *out)?;
-        let correctness = collect_lighteval_result(
-            default_suite(),
-            &correctness_dir,
-            output
-                .correctness
-                .ok_or("correctness execution did not produce output")?,
-        )?;
-        log_correctness(out, &correctness)?;
-        record_resolved_image(&mut config, out)?;
-        let result = TrialResult::new(
-            config,
-            setup.metric,
-            hardware.clone(),
-            model_memory.clone(),
-            output.benchmark.stdout,
-            output.benchmark.stderr,
-        )
-        .with_correctness(correctness);
+        let model_memory = estimate_memory(&config);
+        terminal::info(out, "model-mem", summarize_model_memory(&model_memory))?;
+        let artifact_dir = run_dir.join(format!("trial-{}", index + 1));
+        let mut options = EvaluationOptions::new(&setup.param_cache_dir, artifact_dir);
+        options.refresh_params = setup.refresh_params;
+        options.preflight = false;
+        options.hardware = Some(hardware.clone());
+        options.model_memory = Some(model_memory);
+        let evaluation =
+            evaluate_candidate(config, options, &mut *out).map_err(|err| err.message)?;
+        if let Some(correctness) = &evaluation.correctness {
+            log_correctness(out, correctness)?;
+        }
+        log_resolved_image(&evaluation.config, out)?;
+        let result = evaluation.into_trial_result()?;
         terminal::ok(out, "metrics", metrics_line(&result))?;
         results.push(result);
     }
@@ -349,8 +312,7 @@ fn maybe_submit_leaderboard(
     Ok(())
 }
 
-fn record_resolved_image(config: &mut ServingConfig, out: &mut impl Write) -> Result<()> {
-    config.resolved_image = resolve_docker_image_tag(&config.image, engine_version_package(config));
+fn log_resolved_image(config: &ServingConfig, out: &mut impl Write) -> Result<()> {
     if let Some(resolved) = &config.resolved_image {
         terminal::info(out, "image", format!("resolved={resolved}"))?;
     } else {
@@ -361,13 +323,6 @@ fn record_resolved_image(config: &mut ServingConfig, out: &mut impl Write) -> Re
         )?;
     }
     Ok(())
-}
-
-fn engine_version_package(config: &ServingConfig) -> Option<&'static str> {
-    match config.engine {
-        crate::engine::Engine::Vllm => Some("vllm"),
-        crate::engine::Engine::Sglang => Some("sglang"),
-    }
 }
 
 fn benchmark_configs(setup: &crate::cli::Setup, adapter: &dyn EngineAdapter) -> Vec<ServingConfig> {
@@ -587,27 +542,12 @@ fn image_for(setup: &crate::cli::Setup) -> String {
 }
 
 fn validate_serving_args(setup: &crate::cli::Setup, config: &ServingConfig) -> Result<()> {
-    let adapter = adapter_for(setup.engine);
-    let schema = load_or_inspect(
-        adapter,
-        config.image.clone(),
+    validate_config(
+        config,
         Path::new(&setup.param_cache_dir),
         setup.refresh_params,
-    )?;
-    let args = adapter.serving_args(config);
-    match schema.validate_args(&args) {
-        Ok(()) => Ok(()),
-        Err(err) if !setup.refresh_params => {
-            let schema = load_or_inspect(
-                adapter,
-                config.image.clone(),
-                Path::new(&setup.param_cache_dir),
-                true,
-            )?;
-            schema.validate_args(&args).map_err(|_| err)
-        }
-        Err(err) => Err(err),
-    }
+    )
+    .map(|_| ())
 }
 
 fn validate_serving_configs_from_cache(
@@ -631,17 +571,6 @@ fn validate_serving_configs_from_cache(
 
 fn write_error(err: std::io::Error) -> String {
     format!("failed to write output: {err}")
-}
-
-fn ensure_hf_token() -> Result<()> {
-    if std::env::var("HF_TOKEN")
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-    {
-        Ok(())
-    } else {
-        Err("HF_TOKEN is required for executing serving/benchmark containers".to_string())
-    }
 }
 
 #[cfg(test)]

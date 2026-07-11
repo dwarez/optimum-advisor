@@ -6,6 +6,8 @@ use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
 use crate::{terminal, Result};
 
 pub const OWNED_CONTAINER_LABEL: &str = "optimum-advisor=true";
@@ -49,7 +51,7 @@ pub struct Readiness {
     pub http_path: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BenchmarkRunOutput {
     pub stdout: String,
     pub stderr: String,
@@ -61,8 +63,16 @@ pub struct ManagedRunOutput {
     pub correctness: Option<BenchmarkRunOutput>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct EvaluationRunOutput {
+    pub benchmark: Option<BenchmarkRunOutput>,
+    pub correctness: Option<BenchmarkRunOutput>,
+}
+
 pub fn execute_run_plan(plan: &RunPlan, mut out: impl Write) -> Result<BenchmarkRunOutput> {
-    execute_run_plan_inner(plan, None, &mut out).map(|output| output.benchmark)
+    execute_evaluation_plan(plan, None, true, &mut out)?
+        .benchmark
+        .ok_or_else(|| "benchmark execution did not produce output".to_string())
 }
 
 pub fn execute_run_plan_with_correctness(
@@ -70,14 +80,24 @@ pub fn execute_run_plan_with_correctness(
     correctness: &ProcessSpec,
     mut out: impl Write,
 ) -> Result<ManagedRunOutput> {
-    execute_run_plan_inner(plan, Some(correctness), &mut out)
+    let output = execute_evaluation_plan(plan, Some(correctness), true, &mut out)?;
+    Ok(ManagedRunOutput {
+        benchmark: output
+            .benchmark
+            .ok_or_else(|| "benchmark execution did not produce output".to_string())?,
+        correctness: output.correctness,
+    })
 }
 
-fn execute_run_plan_inner(
+pub fn execute_evaluation_plan(
     plan: &RunPlan,
     correctness: Option<&ProcessSpec>,
+    run_benchmark: bool,
     mut out: impl Write,
-) -> Result<ManagedRunOutput> {
+) -> Result<EvaluationRunOutput> {
+    if correctness.is_none() && !run_benchmark {
+        return Err("evaluation requires correctness, benchmark, or both".to_string());
+    }
     ensure_port_free(&plan.readiness)?;
     let (server_log, server_log_path) = open_server_log()?;
     terminal::info(&mut out, "server", "starting")?;
@@ -98,8 +118,10 @@ fn execute_run_plan_inner(
         let correctness = correctness
             .map(|spec| run_child("correct", spec, &mut out))
             .transpose()?;
-        let benchmark = run_child("benchmark", &plan.benchmark, &mut out)?;
-        Ok(ManagedRunOutput {
+        let benchmark = run_benchmark
+            .then(|| run_child("benchmark", &plan.benchmark, &mut out))
+            .transpose()?;
+        Ok(EvaluationRunOutput {
             benchmark,
             correctness,
         })
@@ -588,6 +610,52 @@ mod tests {
         assert!(!terminal.contains("Output token throughput"));
         assert_eq!(output.correctness.unwrap().stdout, "ok");
         assert!(output.benchmark.stdout.contains("ok"));
+    }
+
+    #[test]
+    fn evaluation_plan_can_run_correctness_without_benchmark() {
+        if Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("failed to bind test listener: {err}"),
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let plan = RunPlan {
+            server: ProcessSpec::new(
+                "python3",
+                vec![
+                    "-m".to_string(),
+                    "http.server".to_string(),
+                    port.to_string(),
+                    "--bind".to_string(),
+                    "127.0.0.1".to_string(),
+                ],
+            ),
+            benchmark: ProcessSpec::new("sh", vec!["-c".to_string(), "exit 99".to_string()]),
+            readiness: Readiness {
+                host: "127.0.0.1".to_string(),
+                port,
+                timeout: Duration::from_secs(5),
+                http_path: None,
+            },
+            server_container: None,
+        };
+        let correctness = ProcessSpec::new("sh", vec!["-c".to_string(), "printf ok".to_string()]);
+
+        let output = execute_evaluation_plan(&plan, Some(&correctness), false, Vec::new()).unwrap();
+
+        assert_eq!(output.correctness.unwrap().stdout, "ok");
+        assert!(output.benchmark.is_none());
     }
 
     #[test]

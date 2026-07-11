@@ -124,11 +124,48 @@ optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute
 optimum-advisor bench --config examples/bench.conf
 optimum-advisor sweep --config examples/sweep.conf
 optimum-advisor hardware
+optimum-advisor mcp
 ```
 
 `bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
 pair per candidate without starting containers. Dry-runs also show the owned
 lighteval endpoint correctness suite that runs against the same server.
+
+## Agent Tools and MCP
+
+`optimum-advisor mcp` starts a local MCP server over stdio. The MCP server and
+the human-facing `bench` and `sweep` commands call the same Rust tool API; MCP
+handlers do not shell out to the CLI.
+
+Exposed tools:
+
+- `inspect_hardware`
+- `inspect_engine`
+- `validate_config`
+- `estimate_memory`
+- `check_correctness`
+- `run_benchmark`
+- `evaluate_candidate`
+- `rank_candidates`
+
+`check_correctness`, `run_benchmark`, and `evaluate_candidate` own the complete
+server lifecycle and always attempt cleanup. Expected candidate failures are
+returned as structured MCP tool results containing the failing stage and
+captured terminal output. `evaluate_candidate` reuses one server for the
+correctness and benchmark stages.
+
+Example MCP server configuration:
+
+```json
+{
+  "mcpServers": {
+    "optimum-advisor": {
+      "command": "/absolute/path/to/optimum-advisor",
+      "args": ["mcp"]
+    }
+  }
+}
+```
 
 ## Leaderboard Submission
 

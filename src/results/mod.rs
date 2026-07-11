@@ -3,15 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
+
 use crate::advisor::hardware::{GpuInfo, HardwareProfile};
 use crate::advisor::model_memory::ModelMemoryEstimate;
 use crate::config::ServingConfig;
-use crate::correctness::{CorrectnessArtifact, CorrectnessResult};
+use crate::correctness::{CorrectnessArtifact, CorrectnessResult, CorrectnessStatus};
 use crate::engine::{Engine, Metric};
 use crate::serve::EngineArg;
 use crate::Result;
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct BenchmarkMetrics {
     pub successful_requests: Option<f64>,
     pub failed_requests: Option<f64>,
@@ -164,7 +166,7 @@ impl BenchmarkMetrics {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TrialResult {
     pub config: ServingConfig,
     pub winning_metric: Metric,
@@ -208,7 +210,7 @@ impl TrialResult {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ResultSet {
     pub winning_metric: Metric,
     pub trials: Vec<TrialResult>,
@@ -269,15 +271,28 @@ pub fn write_config_file(dir: impl AsRef<Path>, name: &str, text: &str) -> Resul
 }
 
 fn compare_results(left: &TrialResult, right: &TrialResult, metric: Metric) -> Ordering {
-    let correctness = correctness_rank(left).cmp(&correctness_rank(right));
+    compare_observations(
+        metric,
+        left.correctness.as_ref().map(|result| result.status),
+        left.metrics.value_for(metric),
+        right.correctness.as_ref().map(|result| result.status),
+        right.metrics.value_for(metric),
+    )
+}
+
+pub fn compare_observations(
+    metric: Metric,
+    left_correctness: Option<CorrectnessStatus>,
+    left_value: Option<f64>,
+    right_correctness: Option<CorrectnessStatus>,
+    right_value: Option<f64>,
+) -> Ordering {
+    let correctness = correctness_rank(left_correctness).cmp(&correctness_rank(right_correctness));
     if correctness != Ordering::Equal {
         return correctness;
     }
 
-    match (
-        left.metrics.value_for(metric),
-        right.metrics.value_for(metric),
-    ) {
+    match (left_value, right_value) {
         (Some(left), Some(right)) if metric.lower_is_better() => left.total_cmp(&right),
         (Some(left), Some(right)) => right.total_cmp(&left),
         (Some(_), None) => Ordering::Less,
@@ -286,12 +301,8 @@ fn compare_results(left: &TrialResult, right: &TrialResult, metric: Metric) -> O
     }
 }
 
-fn correctness_rank(result: &TrialResult) -> u8 {
-    result
-        .correctness
-        .as_ref()
-        .map(|correctness| correctness.status.rank())
-        .unwrap_or(0)
+fn correctness_rank(status: Option<CorrectnessStatus>) -> u8 {
+    status.map(CorrectnessStatus::rank).unwrap_or(0)
 }
 
 fn first_number(text: &str) -> Option<f64> {
@@ -702,34 +713,6 @@ fn now_nanos() -> Result<u128> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .map_err(|err| format!("system clock is before unix epoch: {err}"))
-}
-
-trait MetricDirection {
-    fn lower_is_better(self) -> bool;
-}
-
-impl MetricDirection for Metric {
-    fn lower_is_better(self) -> bool {
-        matches!(
-            self,
-            Metric::Ttft
-                | Metric::P90Ttft
-                | Metric::P95Ttft
-                | Metric::P99Ttft
-                | Metric::Tpot
-                | Metric::P90Tpot
-                | Metric::P95Tpot
-                | Metric::P99Tpot
-                | Metric::Itl
-                | Metric::P90Itl
-                | Metric::P95Itl
-                | Metric::P99Itl
-                | Metric::E2e
-                | Metric::P90E2e
-                | Metric::P95E2e
-                | Metric::P99E2e
-        )
-    }
 }
 
 #[cfg(test)]

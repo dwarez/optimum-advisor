@@ -1,8 +1,11 @@
 use std::fmt;
 
+use serde::Serialize;
+
 use crate::Result;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Engine {
     Vllm,
     Sglang,
@@ -34,7 +37,8 @@ impl fmt::Display for Engine {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Metric {
     Tps,
     TotalTps,
@@ -87,6 +91,28 @@ impl Metric {
             "p99_e2e" | "p99_e2el" => Ok(Self::P99E2e),
             _ => Err(format!("unknown metric: {value}")),
         }
+    }
+
+    pub fn lower_is_better(self) -> bool {
+        matches!(
+            self,
+            Self::Ttft
+                | Self::P90Ttft
+                | Self::P95Ttft
+                | Self::P99Ttft
+                | Self::Tpot
+                | Self::P90Tpot
+                | Self::P95Tpot
+                | Self::P99Tpot
+                | Self::Itl
+                | Self::P90Itl
+                | Self::P95Itl
+                | Self::P99Itl
+                | Self::E2e
+                | Self::P90E2e
+                | Self::P95E2e
+                | Self::P99E2e
+        )
     }
 }
 

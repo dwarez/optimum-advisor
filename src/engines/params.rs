@@ -3,13 +3,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde::Serialize;
+
 use crate::engine::Engine;
 use crate::engines::EngineAdapter;
 use crate::runner::ProcessSpec;
 use crate::serve::{EngineArg, ParamKind, ParameterSpec};
 use crate::Result;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ParameterSchema {
     pub engine: Engine,
     pub image: String,

@@ -1,10 +1,12 @@
 use std::io::ErrorKind;
 use std::process::Command;
 
+use serde::Serialize;
+
 use crate::config::ServingConfig;
 use crate::serve::EngineArg;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ModelMemoryEstimate {
     pub source: String,
     pub model: String,

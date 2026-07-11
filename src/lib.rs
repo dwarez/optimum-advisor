@@ -5,9 +5,11 @@ pub mod correctness;
 pub mod domain;
 pub mod engines;
 pub mod leaderboard;
+pub mod mcp;
 pub mod results;
 pub mod runtime;
 pub mod terminal;
+pub mod tools;
 
 pub use advisor::{hardware, model_memory};
 pub use domain::{config, engine, logs, trial};

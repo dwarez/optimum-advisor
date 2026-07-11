@@ -1,5 +1,6 @@
 use std::fs;
-use std::process::{Command, Output};
+use std::io::Write;
+use std::process::{Command, Output, Stdio};
 
 use optimum_advisor::engine::Engine;
 use optimum_advisor::params::cache_path;
@@ -37,6 +38,82 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
+}
+
+#[test]
+fn mcp_stdio_initializes_lists_and_calls_tools() {
+    let results_dir =
+        std::env::temp_dir().join(format!("optimum-advisor-mcp-smoke-{}", std::process::id()));
+    let mut child = Command::new(env!("CARGO_BIN_EXE_optimum-advisor"))
+        .arg("mcp")
+        .env_remove("HF_TOKEN")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start MCP server");
+    let mut input = child.stdin.take().unwrap();
+    for message in [
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "smoke", "version": "1" }
+            }
+        }),
+        serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+        serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {
+                "name": "rank_candidates",
+                "arguments": {
+                    "metric": "tps",
+                    "candidates": [
+                        { "id": "a", "value": 1.0 },
+                        { "id": "b", "value": 2.0 }
+                    ]
+                }
+            }
+        }),
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {
+                "name": "evaluate_candidate",
+                "arguments": {
+                    "config": { "engine": "vllm", "model": "m" },
+                    "results_dir": results_dir
+                }
+            }
+        }),
+    ] {
+        writeln!(input, "{}", serde_json::to_string(&message).unwrap()).unwrap();
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let responses = stdout(&output)
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(responses.len(), 4);
+    assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
+    assert!(responses[1]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "evaluate_candidate"));
+    assert_eq!(
+        responses[2]["result"]["structuredContent"]["candidates"][0]["id"],
+        "b"
+    );
+    assert_eq!(responses[3]["result"]["isError"], true);
+    assert_eq!(
+        responses[3]["result"]["structuredContent"]["stage"],
+        "preflight"
+    );
 }
 
 #[test]

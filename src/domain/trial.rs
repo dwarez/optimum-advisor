@@ -1,23 +1,25 @@
-#[derive(Clone, Debug, PartialEq)]
+use serde::Serialize;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Candidate {
     pub parallelism: Parallelism,
     pub memory: MemoryBudget,
     pub scheduler: SchedulerBudget,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Parallelism {
     pub tensor: usize,
     pub pipeline: usize,
     pub data: usize,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MemoryBudget {
     pub fraction: f32,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SchedulerBudget {
     pub prefill_token_budget: u32,
     pub max_running_requests: u32,
