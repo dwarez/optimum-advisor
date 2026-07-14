@@ -1,164 +1,289 @@
 # Optimum Advisor
 
-> **Early experimental project.** The CLI, config format, search logic, and
-> engine integrations are still changing. Treat this as a prototype for
-> benchmarking serving setups, not a production optimizer.
+Optimum Advisor is a production-hardened local runner for comparing vLLM and
+SGLang serving configurations on NVIDIA GPU hosts. It resolves container images
+to immutable identities, validates engine arguments against the selected image,
+runs correctness and engine-native benchmarks, preserves failed trials, and
+writes an atomic schema-v2 report.
 
-Optimum Advisor is a Rust CLI for testing LLM serving configurations. It starts
-serving-engine containers, runs engine-native benchmarks, records a structured
-report, and helps compare configurations by metrics such as throughput, TTFT,
-TPOT, ITL, and E2E latency.
+It is **not** a production advisor or cluster scheduler. Candidate execution is
+sequential and local. Selection ranks only observed candidates; it does not yet
+invent configurations or enforce service-level objectives.
 
-Current engine focus: **vLLM** and **SGLang**.
+## Requirements
+
+- Rust **1.85.0** or newer to build from source.
+- Docker with the NVIDIA container runtime (`docker run --gpus ...`).
+- NVIDIA drivers and `nvidia-smi` on execution hosts.
+- The correctness environment when correctness is enabled:
+  `./scripts/setup-correctness-env.sh`.
+- Optional: `hf-mem`, `uvx hf-mem`, or a configured command for model-memory
+  estimates. Missing optional estimation is recorded as a typed warning;
+  `model_memory.required = true` makes it a preflight failure.
+- Optional: a Hugging Face token for gated/private models or leaderboard
+  submission. Public model execution does not require a token.
 
 ## Install
 
-Local install from this checkout:
+From this checkout:
 
 ```bash
 ./scripts/install.sh
 ```
 
-Equivalent raw command:
+Equivalent command:
 
 ```bash
 cargo install --path . --locked --force
 ```
 
-Install from git:
+From Git:
 
 ```bash
 cargo install --git https://github.com/dwarez/optimum-advisor.git --locked --force
 ```
 
-Uninstall:
+Uninstall with `cargo uninstall optimum-advisor`.
+
+## Safe first run
+
+Dry-run planning performs local invariant checks and renders the exact commands.
+It does not pull images, inspect hardware, start Docker containers, contact the
+leaderboard, or require credentials:
 
 ```bash
-cargo uninstall optimum-advisor
+optimum-advisor plan --config examples/bench.toml
+optimum-advisor bench --config examples/bench.toml --dry-run
+optimum-advisor sweep --config examples/sweep.toml --dry-run
 ```
 
-## Requirements
-
-- Rust toolchain with `cargo`
-- Docker
-- NVIDIA runtime for GPU execution (`docker run --gpus ...`)
-- `HF_TOKEN` for benchmark execution
-- correctness env: `./scripts/setup-correctness-env.sh`
-- Optional: `uvx hf-mem` or `hf-mem` for model-memory estimates in reports
-
-## Quick Start
-
-Dry-run a single benchmark command:
+Inspect the host and the selected engine image before execution:
 
 ```bash
-cargo run -- bench --config examples/bench.conf --dry-run
-cargo run -- bench --config examples/sglang-bench.conf --dry-run
+optimum-advisor hardware
+optimum-advisor params \
+  --engine vllm \
+  --image vllm/vllm-openai:latest \
+  --cache-dir .optimum-advisor/params \
+  --refresh
 ```
 
-Run a sweep on a GPU host:
+`params` resolves a tag to a repository digest or image ID before using it as a
+cache identity. `params --offline` performs no Docker or network operation and
+requires both an immutable `repo@sha256:...`/`sha256:...` reference and an exact
+cached schema. `--offline` and `--refresh` are mutually exclusive.
+
+Execute one candidate or a bounded sweep:
 
 ```bash
-export HF_TOKEN=hf_...
-optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute --refresh-params
-optimum-advisor sweep --config examples/sweep.conf
+optimum-advisor bench --config examples/bench.toml
+optimum-advisor bench --config examples/sglang-bench.toml
+optimum-advisor sweep --config examples/sweep.toml
 ```
 
-Inspect the result:
+## Schema-v2 TOML
 
-```bash
-cat .optimum-advisor/results/<sweep-dir>/report.json
-optimum-advisor bench --config .optimum-advisor/results/<sweep-dir>/best.conf
-```
+Configuration files are strict TOML. `schema_version = 2` is required; unknown
+and duplicate keys fail. Operational output directories and dry-run mode remain
+CLI options rather than persisted configuration.
 
-## Config Files
+```toml
+schema_version = 2
+engine = "vllm"
+model = "Qwen/Qwen3-4B-Instruct-2507"
+metric = "tps"
 
-Use config files for real runs. CLI flags are useful for quick checks, but
-config files are easier to repeat and commit.
-
-Single benchmark configs use `[serve]`:
-
-```text
-engine = vllm
-model = Qwen/Qwen3-4B-Instruct-2507
+[runtime]
 gpus = 1
 max_model_len = 8192
-metric = tps
+startup_timeout_secs = 600
+benchmark_timeout_secs = 900
+max_process_output_bytes = 16777216
 
 [benchmark]
+dataset_name = "random"
 num_prompts = 4
-request_rate = 1
+request_rate = "1"
 max_concurrency = 1
+random_input_len = 1024
+random_output_len = 128
+
+[candidate]
+tensor_parallelism = 1
+memory_fraction = 0.90
+prefill_token_budget = 8192
+max_running_requests = 8
+
+[correctness]
+enabled = true
+threshold = 0.80
+timeout_secs = 900
+
+[model_memory]
+enabled = true
+required = false
+timeout_secs = 300
+
+[leaderboard]
+submit = false
 
 [serve]
-gpu-memory-utilization = 0.90
-max-num-batched-tokens = 8192
+dtype = "auto"
 ```
 
-Sweep configs add `[sweep]`. Values in `[sweep]` are real engine serving
-parameters and are validated against the selected engine image at execution
-time.
+`[candidate]` contains portable dimensions translated into the selected
+engine's current CLI. `[serve]` contains explicit engine-specific arguments.
+Names are canonicalized, deduplicated, and validated against the schema obtained
+from the immutable image. Repeatable CLI equivalents are `--serve-arg
+NAME=VALUE` and `--serve-flag NAME`.
 
-```text
-engine = vllm
-model = Qwen/Qwen3-4B-Instruct-2507
-gpus = 2
-max_model_len = 8192
-metric = tps
+A sweep adds bounded arrays. Expansion is deterministic, overflow-checked, and
+fails before execution when its Cartesian product exceeds `max_trials`:
 
-[benchmark]
-num_prompts = 4
-request_rate = 1
-max_concurrency = 1
-
+```toml
 [sweep]
-tensor-parallel-size = 1,2
-gpu-memory-utilization = 0.80,0.90
-max-num-batched-tokens = 4096,8192
+max_trials = 2
+tensor_parallelism = [1, 2]
+
+[sweep.serve]
+# Engine-specific dimensions, when needed:
+# kv-cache-dtype = ["auto", "fp8"]
 ```
+
+See `examples/bench.toml`, `examples/sglang-bench.toml`, and
+`examples/sweep.toml` for runnable configurations.
+
+### Precedence
+
+The merge order is:
+
+1. schema-v2 TOML;
+2. explicit CLI overrides.
+
+Arbitrary `OPTIMUM_ADVISOR_*` variables do not change model, engine, runtime, or
+candidate settings. Environment access is limited to external integration and
+secret discovery: `CUDA_VISIBLE_DEVICES`, `HF_TOKEN`,
+`HUGGING_FACE_HUB_TOKEN`, Hugging Face token locations, `HF_TOKEN_PATH`,
+`HF_HOME`, `OPTIMUM_ADVISOR_HF_MEM`, and
+`OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`.
 
 ## Commands
 
-```bash
-optimum-advisor plan --engine vllm --model Qwen/Qwen3-4B-Instruct-2507
-optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --execute
-optimum-advisor bench --config examples/bench.conf
-optimum-advisor sweep --config examples/sweep.conf
-optimum-advisor hardware
-optimum-advisor mcp
+```text
+plan      Render one validated, non-executing server/benchmark preview
+params    Resolve an image and inspect/cache its engine parameter schema
+hardware  Inspect selected local NVIDIA GPUs
+serve     Run one validated owned serving container until exit/interruption
+bench     Evaluate one candidate
+sweep     Evaluate the bounded sweep from a v2 TOML file
+cleanup   List or remove only Optimum Advisor-owned containers
+mcp       Serve newline-delimited MCP JSON-RPC over stdin/stdout
 ```
 
-`bench --dry-run` prints one server/benchmark pair. `sweep --dry-run` prints one
-pair per candidate without starting containers. Dry-runs also show the owned
-lighteval endpoint correctness suite that runs against the same server.
+Run `optimum-advisor <command> --help` for the exact options, except `mcp`,
+which intentionally accepts no arguments and reserves stdout for protocol
+frames.
 
-When serving args configure `--tool-call-parser` or `--reasoning-parser`, the
-correctness stage also sends OpenAI chat-completion probes that verify parsed
-tool calls and separated reasoning output. Probe failures fail correctness.
+### GPU selection
 
-## Agent Tools and MCP
+`runtime.gpus` selects a count. `runtime.gpu_devices` or repeated
+`--gpu-device` values select explicit GPU indexes/UUIDs. Explicit devices must
+be nonempty and unique, and their count must match `gpus`. Tensor parallelism
+must be nonzero, cannot exceed the selected count, and must divide it evenly.
 
-`optimum-advisor mcp` starts a local MCP server over stdio. The MCP server and
-the human-facing `bench` and `sweep` commands call the same Rust tool API; MCP
-handlers do not shell out to the CLI.
+### Timeouts, cancellation, and cleanup
 
-Exposed tools:
+Startup, benchmark, correctness, model-memory, HTTP, and output limits are
+bounded. SIGINT/SIGTERM cancellation propagates through active subprocesses.
+On Unix, child process groups receive TERM, a bounded grace period, and then
+KILL. Docker cleanup targets only containers carrying all Optimum Advisor
+ownership labels, including the run ID and role.
 
-- `inspect_hardware`
-- `inspect_engine`
-- `validate_config`
-- `estimate_memory`
-- `check_correctness`
-- `run_benchmark`
-- `evaluate_candidate`
-- `rank_candidates`
+Inspect without removing:
 
-`check_correctness`, `run_benchmark`, and `evaluate_candidate` own the complete
-server lifecycle and always attempt cleanup. Expected candidate failures are
-returned as structured MCP tool results containing the failing stage and
-captured terminal output. `evaluate_candidate` reuses one server for the
-correctness and benchmark stages.
+```bash
+optimum-advisor cleanup --dry-run
+optimum-advisor cleanup --run-id <run-id> --dry-run
+```
 
-Example MCP server configuration:
+Remove matching owned containers:
+
+```bash
+optimum-advisor cleanup --run-id <run-id>
+```
+
+The cleanup command never targets an unlabeled or partially labeled container.
+
+## Reports and artifacts
+
+Every executed `bench` or `sweep` creates a private directory under
+`.optimum-advisor/results` unless `--results-dir` overrides it. The directory is
+created before external preflight and immediately receives `report.json`.
+
+`report.json` is schema version 2 and is atomically checkpointed after
+preflight, after each trial, after winning-config selection, and after
+leaderboard submission. Terminal states are:
+
+- `completed`;
+- `completed_with_failures`;
+- `failed`;
+- `interrupted`.
+
+Expected candidate failures do not abort a sweep. Each failed trial records a
+typed stage/kind, timeout/interruption flags, and bounded UTF-8-safe stdout and
+stderr tails. Ranking considers correctness first, then the selected metric's
+direction, then stable trial order. Missing or non-finite selected metrics
+cannot win. If every candidate fails, the process fails but the terminal report
+and all trial evidence remain available.
+
+Important paths:
+
+- `report.json`: durable source of truth;
+- `best.toml`: runnable winning schema-v2 configuration, written only after a
+  successful winner exists;
+- `trials/NNNN/`: per-trial correctness, benchmark, and bounded diagnostic
+  artifacts recorded in the report manifest.
+
+All result directories are mode `0700` and sensitive files are mode `0600` on
+Unix.
+
+## Correctness
+
+When enabled, correctness runs against the same owned server before its
+benchmark. The suite records task scores and, when configured, probes OpenAI
+chat-completion tool-call and reasoning-parser behavior. The finite threshold
+must be in `[0, 1]`; `0` validates execution and complete metric collection
+without imposing a model-quality floor. A missed positive threshold fails the
+trial and prevents it from winning.
+
+Install the pinned external tools in a repository-local environment:
+
+```bash
+./scripts/setup-correctness-env.sh
+source .venv/bin/activate
+```
+
+## Secrets and leaderboard submission
+
+Tokens and submission keys use redacted wrappers, are attached only to child
+environments or HTTPS authorization, and are not included in safe command
+rendering, reports, artifacts, URLs, or persisted configuration. Captured
+process streams are sanitized before storage.
+
+Leaderboard publishing is opt-in through `[leaderboard] submit = true` or
+`--leaderboard-submit`. The default endpoint is
+`https://hf-dwarez-optimum-advisor-leaderboard.hf.space`; set
+`leaderboard.url` or `--leaderboard-url` to override it. The client requires
+HTTPS, uses rustls plus platform certificate verification, bounds response
+bodies, and applies connect/read/overall deadlines.
+
+Authenticate with `hf auth login` or `HF_TOKEN`. Contributor identity is
+inferred from that credential. An optional administrative submit key is read
+from `OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`. Neither credential is persisted.
+
+## MCP server
+
+Configure an MCP client to start the binary directly:
 
 ```json
 {
@@ -171,79 +296,81 @@ Example MCP server configuration:
 }
 ```
 
-## Leaderboard Submission
+The transport is strict newline-delimited JSON-RPC 2.0. Clients initialize,
+receive protocol version `2025-11-25`, send `notifications/initialized`, and
+then call tools. Requests are processed sequentially; `ping` remains available
+during initialization. `notifications/cancelled` cancels a matching queued or
+active tool request. Input lines are capped at 1 MiB, responses at 256 KiB, and
+human-readable tool text at 64 KiB. Stdout contains protocol frames only.
 
-Publishing is opt-in. Contributor identity comes from the local Hugging Face
-login, not from a CLI flag. The local HF token is sent as an Authorization
-header so allowed users can be approved without a submit key. Untrusted
-submissions are queued for review. Tokens and submit keys are never written to
-`report.json`.
-The default URL is `https://hf-dwarez-optimum-advisor-leaderboard.hf.space`;
-override it with `--leaderboard-url` or `OPTIMUM_ADVISOR_LEADERBOARD_URL`.
+Tools:
 
-Login first:
+- `inspect_hardware`;
+- `inspect_engine`;
+- `validate_config`;
+- `estimate_memory`;
+- `check_correctness`;
+- `run_benchmark`;
+- `evaluate_candidate`;
+- `run_sweep`;
+- `rank_candidates`.
+
+Input and output JSON Schemas are generated from the same strict Rust DTOs used
+for decoding. Unknown fields fail. Execution tools use the same cancellation,
+immutable image, validation, persistence, and cleanup path as the CLI. They
+return bounded summaries plus durable report paths. Tool-domain failures remain
+successful JSON-RPC responses with `isError: true` and a typed payload;
+malformed envelopes and unknown methods use JSON-RPC errors.
+
+## Real GPU-host acceptance
+
+The ignored acceptance test performs real hardware selection, immutable image
+and parameter inspection, one tiny correctness-plus-benchmark candidate, a
+two-candidate sweep, SIGINT cleanup, report-v2 checks, winning-config checks,
+and owned-container leak comparison. It does not fake GPU success.
+
+Prepare the correctness environment, choose a model appropriate for the host,
+and opt in explicitly:
 
 ```bash
-hf auth login
+./scripts/setup-correctness-env.sh
+source .venv/bin/activate
+
+OPTIMUM_ADVISOR_GPU_ACCEPTANCE=1 \
+OPTIMUM_ADVISOR_GPU_ACCEPTANCE_MODEL=Qwen/Qwen3-0.6B \
+cargo test --test gpu_acceptance -- --ignored --nocapture
 ```
 
-Submission with local HF auth:
+Optional overrides:
 
 ```bash
-OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT=1 \
-optimum-advisor bench --config examples/bench.conf
+OPTIMUM_ADVISOR_GPU_ACCEPTANCE_ENGINE=sglang
+OPTIMUM_ADVISOR_GPU_ACCEPTANCE_IMAGE=repo/image@sha256:<digest>
 ```
 
-Admin-key submission:
+Run this only on a disposable or controlled GPU host: it pulls/starts real
+containers and performs real inference.
+
+## Development gates
 
 ```bash
-OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT=1 \
-OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY=... \
-optimum-advisor sweep --config examples/sweep.conf
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --all-features --locked
+cargo build --release --all-features --locked
+cargo +1.85.0 test --all-targets --all-features --locked
+sh -n scripts/install.sh scripts/setup-correctness-env.sh
 ```
 
-CLI equivalents are available:
+CI also runs RustSec `cargo audit` and ShellCheck.
 
-```bash
-optimum-advisor bench --config examples/bench.conf \
-  --leaderboard-submit
-```
+## Explicit limitations
 
-## Results
-
-Each execution writes a directory under `.optimum-advisor/results` unless
-`--results-dir` is set.
-
-Main artifact:
-
-- `report.json`: source of truth with hardware, model-memory estimate, tested
-  configs, benchmark metrics, correctness results, stdout, stderr, winning
-  metric, and best trial
-
-Convenience artifacts:
-
-- `config.conf`: runnable config produced by `bench`
-- `best.conf`: runnable best config produced by `sweep`
-- `correctness/responses.json`: per-sample correctness prompts, responses, and metrics when correctness details are available
-- `correctness/capabilities.json`: configured tool-calling and reasoning parser probe results
-
-## Current Scope
-
-Implemented:
-
-- vLLM serving and `vllm bench serve`
-- SGLang serving and `sglang.bench_serving`
-- runtime serving-parameter introspection from container images
-- Docker lifecycle cleanup for owned server containers
-- hardware detection through `nvidia-smi`
-- optional model-memory estimation through `hf-mem`
-- owned lighteval endpoint correctness suite captured in `report.json`
-- structured benchmark reports and basic best-result selection
-
-Still missing:
-
-- failure-tolerant sweeps that record bad/OOM candidates instead of aborting
-- baseline-vs-candidate correctness degradation scoring
-- advisor heuristics using hardware and model-memory budgets
-- richer constraints such as latency ceilings and minimum throughput
-- broader CUDA-host integration coverage
+- execution is sequential and local, not distributed;
+- Docker and NVIDIA GPU support are required for real serving runs;
+- model-memory estimation depends on an optional external `hf-mem` command;
+- correctness depends on the separately installed pinned Python tools;
+- no advisor heuristics currently generate candidates from hardware or memory
+  budgets;
+- no latency-ceiling or minimum-throughput constraint solver exists;
+- GPU-host acceptance is opt-in and is not simulated in ordinary CI.

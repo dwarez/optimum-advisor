@@ -1,0 +1,28 @@
+schema_version = 2
+engine = "vllm"
+image = "vllm/vllm-openai:latest"
+model = "test/model"
+metric = "tps"
+
+[runtime]
+gpus = 1
+
+[benchmark]
+dataset_name = "random"
+num_prompts = 2
+request_rate = "1"
+max_concurrency = 1
+random_input_len = 8
+random_output_len = 4
+
+[candidate]
+tensor_parallelism = 1
+memory_fraction = 0.9
+prefill_token_budget = 1024
+max_running_requests = 8
+
+[correctness]
+enabled = false
+
+[model_memory]
+enabled = false

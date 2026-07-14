@@ -5,7 +5,7 @@ log() {
   printf '[correctness-env] %s\n' "$*"
 }
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 venv_dir="$repo_dir/.venv"
 
 command -v uv >/dev/null 2>&1 || {
