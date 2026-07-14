@@ -1,10 +1,11 @@
-use std::fmt;
+use std::{fmt, str::FromStr};
 
-use serde::Serialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-use crate::Result;
+use crate::error::{Error, Result};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Engine {
     Vllm,
@@ -16,7 +17,7 @@ impl Engine {
         match value {
             "vllm" => Ok(Self::Vllm),
             "sglang" => Ok(Self::Sglang),
-            _ => Err(format!("unknown engine: {value}")),
+            _ => Err(Error::validation(format!("unknown engine: {value}"))),
         }
     }
 
@@ -25,6 +26,14 @@ impl Engine {
             Self::Vllm => "vllm/vllm-openai:latest",
             Self::Sglang => "lmsysorg/sglang:latest",
         }
+    }
+}
+
+impl FromStr for Engine {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 
@@ -37,7 +46,7 @@ impl fmt::Display for Engine {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
     Tps,
@@ -89,7 +98,7 @@ impl Metric {
             "p90_e2e" | "p90_e2el" => Ok(Self::P90E2e),
             "p95_e2e" | "p95_e2el" => Ok(Self::P95E2e),
             "p99_e2e" | "p99_e2el" => Ok(Self::P99E2e),
-            _ => Err(format!("unknown metric: {value}")),
+            _ => Err(Error::validation(format!("unknown metric: {value}"))),
         }
     }
 
@@ -113,6 +122,14 @@ impl Metric {
                 | Self::P95E2e
                 | Self::P99E2e
         )
+    }
+}
+
+impl FromStr for Metric {
+    type Err = Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::parse(value)
     }
 }
 
@@ -143,17 +160,6 @@ impl fmt::Display for Metric {
             Self::P99E2e => write!(f, "p99_e2e"),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Mode {
-    Plan,
-    Params,
-    Hardware,
-    Serve,
-    Bench,
-    Sweep,
-    Advise,
 }
 
 #[cfg(test)]

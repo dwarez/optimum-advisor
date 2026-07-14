@@ -1,0 +1,37 @@
+# One v2 benchmark candidate. Image tags are resolved to immutable identities before execution.
+schema_version = 2
+engine = "vllm"
+model = "Qwen/Qwen3-4B-Instruct-2507"
+metric = "tps"
+
+[runtime]
+gpus = 1
+max_model_len = 8192
+startup_timeout_secs = 600
+benchmark_timeout_secs = 900
+
+[benchmark]
+num_prompts = 4
+request_rate = "1"
+max_concurrency = 1
+random_input_len = 1024
+random_output_len = 128
+
+[candidate]
+tensor_parallelism = 1
+memory_fraction = 0.90
+prefill_token_budget = 8192
+max_running_requests = 8
+
+[correctness]
+enabled = true
+threshold = 0.80
+timeout_secs = 900
+
+[model_memory]
+enabled = true
+required = false
+timeout_secs = 300
+
+[leaderboard]
+submit = false

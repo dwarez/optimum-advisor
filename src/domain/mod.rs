@@ -1,4 +1,3 @@
-pub mod config;
+pub(crate) mod candidate;
 pub mod engine;
-pub mod logs;
-pub mod trial;
+pub(crate) mod run;

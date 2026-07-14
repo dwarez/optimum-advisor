@@ -5,7 +5,7 @@ log() {
   printf '[install] %s\n' "$*"
 }
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 install_root=${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}
 bin_dir="$install_root/bin"
 
