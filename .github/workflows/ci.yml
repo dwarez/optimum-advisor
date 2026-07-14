@@ -60,5 +60,14 @@ jobs:
           cargo audit
       - name: Check shell syntax
         run: sh -n scripts/install.sh scripts/setup-correctness-env.sh
+      - name: Check embedded Python syntax
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/optimum-advisor-pycache
+        run: >-
+          python3 -m py_compile
+          src/python/capability_probes.py
+          src/python/inspect_vllm_args.py
+          src/python/inspect_sglang_args.py
+          tests/fixtures/fake_server.py
       - name: Lint maintained shell scripts
         run: shellcheck scripts/install.sh scripts/setup-correctness-env.sh
