@@ -362,29 +362,7 @@ mod execution {
             let bin = directory.path().join("bin");
             fs::create_dir(&bin).unwrap();
             let server = directory.path().join("server.py");
-            fs::write(
-                &server,
-                r#"import http.server
-import socketserver
-import sys
-
-class Handler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):
-        body = b'{}'
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args):
-        pass
-
-with socketserver.TCPServer(('127.0.0.1', int(sys.argv[1])), Handler) as server:
-    server.serve_forever()
-"#,
-            )
-            .unwrap();
+            fs::write(&server, include_str!("fixtures/fake_server.py")).unwrap();
             let docker = bin.join("docker");
             fs::write(
                 &docker,
