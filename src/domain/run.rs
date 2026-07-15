@@ -52,6 +52,38 @@ pub(crate) enum ExecutionBackend {
     InContainer,
 }
 
+/// Selects where an evaluation runs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ExecutionTarget {
+    /// Execute on the local host (Docker backend).
+    #[default]
+    Local,
+    /// Submit the evaluation to Hugging Face Jobs (in-container backend).
+    HfJobs,
+}
+
+impl FromStr for ExecutionTarget {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "local" => Ok(Self::Local),
+            "hf-jobs" => Ok(Self::HfJobs),
+            _ => Err(format!("unknown execution target: {value}")),
+        }
+    }
+}
+
+impl fmt::Display for ExecutionTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Local => formatter.write_str("local"),
+            Self::HfJobs => formatter.write_str("hf-jobs"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub(crate) struct ResolvedImage {
     pub requested: String,

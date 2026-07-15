@@ -8,11 +8,11 @@ use crate::{
     app::{
         run_correctness_check_with_cancellation, run_evaluation_with_cancellation, EvaluationResult,
     },
-    cli::args::{CommandKind, Invocation},
+    cli::args::{CommandKind, HfJobsSettings, Invocation},
     config::{ConfigInput, ExecutableConfig, RuntimeInput},
     domain::{
         engine::{Engine, Metric},
-        run::{ExecutionBackend, PullPolicy, ResolvedImage},
+        run::{ExecutionBackend, ExecutionTarget, PullPolicy, ResolvedImage},
     },
     error::{Error, ErrorKind, ExecutionStage, Result},
     inspection::{
@@ -487,6 +487,9 @@ fn execution_invocation(args: ExecutionArgs, kind: RunKind) -> Invocation {
         input: args.config,
         execute: true,
         backend: ExecutionBackend::Docker,
+        target: ExecutionTarget::Local,
+        config_path: None,
+        hf_jobs: HfJobsSettings::default(),
         results_dir: args
             .results_dir
             .unwrap_or_else(|| PathBuf::from(DEFAULT_RESULTS_DIR)),

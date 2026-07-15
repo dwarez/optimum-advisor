@@ -25,6 +25,9 @@ invent configurations or enforce service-level objectives.
   `model_memory.required = true` makes it a preflight failure.
 - Optional: a Hugging Face token for gated/private models or leaderboard
   submission. Public model execution does not require a token.
+- Optional: the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
+  and a logged-in account to submit runs with `--on hf-jobs`; see
+  [Running on Hugging Face Jobs](#running-on-hugging-face-jobs).
 
 ## Install
 
@@ -215,6 +218,56 @@ handling differ. Under `--in-container` the Hugging Face token, when present, is
 passed through the child environment rather than a `docker run -e` flag, and the
 engine parameter schema is inspected by running `python3` directly instead of
 through Docker.
+
+### Running on Hugging Face Jobs
+
+`bench` and `sweep` accept `--on hf-jobs` to run on Hugging Face Jobs instead of
+the local host. The evaluation runs inside a single GPU container (the engine
+image) through the in-container backend, so no local Docker or GPU is required —
+only the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli), a
+logged-in account (`hf auth login`) with a positive credit balance, and a
+published release of the prebuilt Linux binary.
+
+```bash
+optimum-advisor bench --config examples/bench.toml \
+  --on hf-jobs --hf-flavor a10g-large \
+  --results-bucket hf://buckets/<namespace>/<name>
+```
+
+The launcher submits an `hf jobs run` whose container downloads the prebuilt
+binary, materializes the config, and runs the evaluation with `--in-container`.
+The job container image is the config's `image` (defaulting to the engine's own
+image, e.g. `vllm/vllm-openai:latest`); for `bench`, `--image` overrides it —
+useful for custom builds that bundle the engine — and is forwarded to the in-job
+run so the report records the image the job actually ran on. Add `--dry-run` to
+print the exact `hf jobs run` command without submitting.
+
+Options are valid only with `--on hf-jobs`:
+
+| Flag | Meaning |
+| --- | --- |
+| `--hf-flavor` | Hardware flavor (required), e.g. `a10g-large`, `a100-large`. |
+| `--hf-timeout` | Maximum job duration (`90m`, `2h`); the Jobs default is 30 minutes. |
+| `--hf-namespace` | Organization namespace to run the job under. |
+| `--results-bucket` | Persist results to `hf://buckets/<namespace>/<name>[/<path>]`. |
+| `--hf-detach` | Submit in the background and print only the job ID. |
+| `--hf-binary-url` | Override the prebuilt binary URL downloaded inside the job (defaults to the GitHub release matching this binary's version). |
+
+Constraints and behavior:
+
+- Requires `--config`; the only supported CLI override is `--image` (see above),
+  so put every other setting in the file.
+- A local Hugging Face token, when present, is forwarded with `hf jobs run
+  --secrets HF_TOKEN` (encrypted server-side) for gated models and bucket access.
+- Results are written to a local directory inside the job and transferred once
+  at the end — also for failed runs, preserving failed-trial evidence. With
+  `--results-bucket` the bucket is mounted read-write and receives a bulk copy
+  of `report.json`, `best.toml`, and per-trial artifacts; without it, results
+  live only in the ephemeral container and the final `report.json` is printed to
+  the job logs.
+- When `[correctness] enabled = true`, the pinned correctness tools are installed
+  into an isolated `uv` environment inside the job, leaving the engine's own
+  dependencies untouched.
 
 ### GPU selection
 

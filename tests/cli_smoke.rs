@@ -96,6 +96,144 @@ fn plan_is_a_secret_safe_deterministic_dry_run() {
     assert!(!text.contains("hf_"));
 }
 
+const HF_JOBS_CONFIG: &str = r#"
+schema_version = 2
+engine = "vllm"
+model = "repo/model"
+metric = "tps"
+
+[runtime]
+gpus = 1
+max_model_len = 4096
+
+[benchmark]
+num_prompts = 4
+
+[candidate]
+tensor_parallelism = 1
+
+[correctness]
+enabled = true
+threshold = 0.5
+"#;
+
+#[test]
+fn hf_jobs_submission_is_a_rendered_dry_run() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, HF_JOBS_CONFIG);
+    let config = config.to_str().unwrap();
+
+    // Without a bucket: results are dumped to the job logs.
+    let output = run(&[
+        "bench",
+        "--config",
+        config,
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--dry-run",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.starts_with("hf jobs run --flavor a10g-large"),
+        "{text}"
+    );
+    assert!(text.contains("vllm/vllm-openai:latest sh -c"));
+    assert!(text.contains("urllib.request.urlretrieve"));
+    assert!(text.contains(&format!(
+        "releases/download/v{}/optimum-advisor-x86_64-unknown-linux-musl",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(text.contains("base64 -d > /tmp/optimum-advisor-config.toml"));
+    assert!(text.contains("bench --in-container --config /tmp/optimum-advisor-config.toml"));
+    assert!(text.contains("--results-dir /tmp/optimum-advisor-results"));
+    assert!(text.contains("uv pip install --quiet"));
+    assert!(text.contains("lighteval==0.13.0"));
+    assert!(text.contains("find /tmp/optimum-advisor-results -name report.json"));
+
+    // With a bucket: mounted read-write, no log dump.
+    let output = run(&[
+        "bench",
+        "--config",
+        config,
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--results-bucket",
+        "hf://buckets/me/oa",
+        "--dry-run",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("-v hf://buckets/me/oa:/results:rw"));
+    // The run stages locally; one bulk copy lands in the mounted bucket at the
+    // end, and it also runs for failed evaluations.
+    assert!(text.contains("--results-dir /tmp/optimum-advisor-results"));
+    assert!(!text.contains("--results-dir /results"));
+    assert!(text.contains("cp -r /tmp/optimum-advisor-results/. /results/"));
+    assert!(!text.contains("find /tmp/optimum-advisor-results -name report.json"));
+}
+
+#[test]
+fn hf_jobs_image_override_selects_and_forwards_the_job_image() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, HF_JOBS_CONFIG);
+    let config = config.to_str().unwrap();
+
+    let output = run(&[
+        "bench",
+        "--config",
+        config,
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--image",
+        "repo/custom-vllm:2",
+        "--dry-run",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    // The override is the job container image...
+    assert!(text.contains("repo/custom-vllm:2 sh -c"), "{text}");
+    assert!(!text.contains("vllm/vllm-openai:latest"));
+    // ...and is forwarded in-job so the report identity matches it.
+    assert!(text.contains("--image repo/custom-vllm:2"));
+}
+
+#[test]
+fn hf_jobs_requires_flavor_config_and_forbids_overrides() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, HF_JOBS_CONFIG);
+    let config = config.to_str().unwrap();
+
+    let no_flavor = run(&["bench", "--config", config, "--on", "hf-jobs", "--dry-run"]);
+    assert_eq!(no_flavor.status.code(), Some(2));
+    assert!(stderr(&no_flavor).contains("requires --hf-flavor"));
+
+    let local_with_hf = run(&["bench", "--config", config, "--hf-flavor", "a10g-large"]);
+    assert_eq!(local_with_hf.status.code(), Some(2));
+    assert!(stderr(&local_with_hf).contains("require --on hf-jobs"));
+
+    let override_conflict = run(&[
+        "bench",
+        "--config",
+        config,
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--model",
+        "other/model",
+        "--dry-run",
+    ]);
+    assert_eq!(override_conflict.status.code(), Some(2));
+    assert!(stderr(&override_conflict).contains("supports only the --image CLI override"));
+}
+
 #[test]
 fn schema_v2_config_and_cli_overlay_use_one_canonical_model() {
     let directory = TempDir::new().unwrap();

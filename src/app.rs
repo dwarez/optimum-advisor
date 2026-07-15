@@ -17,7 +17,7 @@ use crate::{
     domain::{
         candidate::CandidateSpec,
         engine::Engine,
-        run::{ExecutionBackend, PullPolicy, ResolvedImage},
+        run::{ExecutionBackend, ExecutionTarget, PullPolicy, ResolvedImage},
     },
     engines::managed::{managed_run_plan, safe_display, ManagedRunPlan},
     error::{Error, ErrorKind, ErrorPayload, ExecutionStage, Result},
@@ -103,10 +103,30 @@ pub fn run(
                 CommandKind::Plan => run_plan(invocation, &mut stdout),
                 CommandKind::Serve => run_serve(invocation, &mut stderr),
                 CommandKind::Bench => {
-                    run_evaluation(invocation, RunKind::Bench, &mut stdout, &mut stderr).map(|_| ())
+                    if invocation.target == ExecutionTarget::HfJobs {
+                        crate::hf_jobs::submit(
+                            &invocation,
+                            RunKind::Bench,
+                            &mut stdout,
+                            &mut stderr,
+                        )
+                    } else {
+                        run_evaluation(invocation, RunKind::Bench, &mut stdout, &mut stderr)
+                            .map(|_| ())
+                    }
                 }
                 CommandKind::Sweep => {
-                    run_evaluation(invocation, RunKind::Sweep, &mut stdout, &mut stderr).map(|_| ())
+                    if invocation.target == ExecutionTarget::HfJobs {
+                        crate::hf_jobs::submit(
+                            &invocation,
+                            RunKind::Sweep,
+                            &mut stdout,
+                            &mut stderr,
+                        )
+                    } else {
+                        run_evaluation(invocation, RunKind::Sweep, &mut stdout, &mut stderr)
+                            .map(|_| ())
+                    }
                 }
                 CommandKind::Cleanup => run_cleanup(invocation, &mut stdout),
                 CommandKind::Mcp => Err(Error::usage(
