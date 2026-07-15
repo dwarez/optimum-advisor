@@ -17,7 +17,7 @@ use crate::{
     domain::{
         candidate::CandidateSpec,
         engine::Engine,
-        run::{PullPolicy, ResolvedImage},
+        run::{ExecutionBackend, ExecutionTarget, PullPolicy, ResolvedImage},
     },
     engines::managed::{managed_run_plan, safe_display, ManagedRunPlan},
     error::{Error, ErrorKind, ErrorPayload, ExecutionStage, Result},
@@ -44,7 +44,10 @@ use crate::{
     runtime::{
         atomic::{atomic_write, create_private_dir},
         cancel::CancellationToken,
-        docker::{cleanup_owned_containers, immutable_reference, resolve_image},
+        docker::{
+            cleanup_owned_containers, immutable_reference, in_container_image_identity,
+            resolve_image,
+        },
         params::{cached_parameter_schema, load_parameter_schema},
         process::{
             ArtifactCapture, ProcessCapture, ProcessExecutor, ProcessFailure, ProcessOutcome,
@@ -100,10 +103,30 @@ pub fn run(
                 CommandKind::Plan => run_plan(invocation, &mut stdout),
                 CommandKind::Serve => run_serve(invocation, &mut stderr),
                 CommandKind::Bench => {
-                    run_evaluation(invocation, RunKind::Bench, &mut stdout, &mut stderr).map(|_| ())
+                    if invocation.target == ExecutionTarget::HfJobs {
+                        crate::hf_jobs::submit(
+                            &invocation,
+                            RunKind::Bench,
+                            &mut stdout,
+                            &mut stderr,
+                        )
+                    } else {
+                        run_evaluation(invocation, RunKind::Bench, &mut stdout, &mut stderr)
+                            .map(|_| ())
+                    }
                 }
                 CommandKind::Sweep => {
-                    run_evaluation(invocation, RunKind::Sweep, &mut stdout, &mut stderr).map(|_| ())
+                    if invocation.target == ExecutionTarget::HfJobs {
+                        crate::hf_jobs::submit(
+                            &invocation,
+                            RunKind::Sweep,
+                            &mut stdout,
+                            &mut stderr,
+                        )
+                    } else {
+                        run_evaluation(invocation, RunKind::Sweep, &mut stdout, &mut stderr)
+                            .map(|_| ())
+                    }
                 }
                 CommandKind::Cleanup => run_cleanup(invocation, &mut stdout),
                 CommandKind::Mcp => Err(Error::usage(
@@ -159,6 +182,7 @@ fn run_params(invocation: Invocation, out: &mut impl Write) -> Result<()> {
             invocation.refresh_parameters,
             &executor,
             &cancellation,
+            invocation.backend,
         )?;
         (identity.immutable, schema, "runtime_or_cache")
     };
@@ -221,13 +245,16 @@ fn run_serve(invocation: Invocation, out: &mut impl Write) -> Result<()> {
     let token = resolve_hf_token(&ProcessExecutor::default(), &cancellation)?;
     let executor =
         ProcessExecutor::with_credentials(token.as_ref().into_iter().map(Secret::expose));
-    let identity = resolve_image(
-        &normalized.image,
-        normalized.runtime.pull_policy,
-        normalized.runtime.allow_local_image,
-        &executor,
-        &cancellation,
-    )?;
+    let identity = match invocation.backend {
+        ExecutionBackend::Docker => resolve_image(
+            &normalized.image,
+            normalized.runtime.pull_policy,
+            normalized.runtime.allow_local_image,
+            &executor,
+            &cancellation,
+        )?,
+        ExecutionBackend::InContainer => in_container_image_identity(&normalized.image)?,
+    };
     let hardware = inspect_hardware(&normalized.runtime, &executor, &cancellation)?;
     writeln_checked(out, &format_hardware_profile(&hardware))?;
     let config = normalized.clone().into_executable(identity.resolved());
@@ -243,8 +270,8 @@ fn run_serve(invocation: Invocation, out: &mut impl Write) -> Result<()> {
 
     let artifacts = invocation.results_dir.join("serve");
     create_private_dir(&artifacts)?;
-    let mut plan = managed_run_plan(&config, "serve", &artifacts)?;
-    attach_hf_token(&mut plan, token.as_ref());
+    let mut plan = managed_run_plan(&config, "serve", &artifacts, invocation.backend)?;
+    attach_hf_token(&mut plan, token.as_ref(), invocation.backend);
     let mut server = ManagedServer::start(
         &executor,
         &plan.server,
@@ -341,6 +368,7 @@ pub(crate) fn run_evaluation_with_cancellation(
             &executor,
             credentials.hf_token.as_ref(),
             cancellation,
+            invocation.backend,
         ) {
             Ok(trial) => trial,
             Err(error) => {
@@ -516,6 +544,7 @@ pub(crate) fn run_correctness_check_with_cancellation(
         &executor,
         credentials.hf_token.as_ref(),
         cancellation,
+        invocation.backend,
     ) {
         Ok(execution) => execution,
         Err(error) => {
@@ -688,13 +717,16 @@ fn evaluation_preflight(
         redactions.push(key.expose());
     }
     let executor = ProcessExecutor::with_credentials(redactions);
-    let identity = resolve_image(
-        &normalized.image,
-        normalized.runtime.pull_policy,
-        normalized.runtime.allow_local_image,
-        &executor,
-        cancellation,
-    )?;
+    let identity = match invocation.backend {
+        ExecutionBackend::Docker => resolve_image(
+            &normalized.image,
+            normalized.runtime.pull_policy,
+            normalized.runtime.allow_local_image,
+            &executor,
+            cancellation,
+        )?,
+        ExecutionBackend::InContainer => in_container_image_identity(&normalized.image)?,
+    };
     let hardware = inspect_hardware(&normalized.runtime, &executor, cancellation)?;
     let configs = executable_candidates(normalized, &identity.resolved(), kind)?;
     validate_parameter_sets(
@@ -742,6 +774,7 @@ fn validate_parameter_sets(
         invocation.refresh_parameters,
         executor,
         cancellation,
+        invocation.backend,
     )?;
     for config in configs {
         schema.validate(&config.serve_args)?;
@@ -814,6 +847,7 @@ fn render_plans(
             config,
             &format!("dry-{index}"),
             Path::new(".optimum-advisor/dry-run"),
+            invocation.backend,
         )?;
         let server_label = if plan_labels { "serve" } else { "server" };
         let benchmark_label = if plan_labels { "bench" } else { "benchmark" };
@@ -860,6 +894,7 @@ struct TrialExecution {
     correctness: Option<CorrectnessResult>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_trial(
     index: usize,
     config: ExecutableConfig,
@@ -868,6 +903,7 @@ fn execute_trial(
     executor: &ProcessExecutor,
     hf_token: Option<&Secret>,
     cancellation: &CancellationToken,
+    backend: ExecutionBackend,
 ) -> Result<TrialOutcome> {
     let TrialExecution {
         config,
@@ -888,6 +924,7 @@ fn execute_trial(
         executor,
         hf_token,
         cancellation,
+        backend,
     )?;
     finish_trial(
         index,
@@ -908,6 +945,7 @@ fn execute_trial_steps(
     executor: &ProcessExecutor,
     hf_token: Option<&Secret>,
     cancellation: &CancellationToken,
+    backend: ExecutionBackend,
 ) -> Result<TrialExecution> {
     let TrialExecutionInput {
         index,
@@ -923,7 +961,7 @@ fn execute_trial_steps(
     let mut metrics = None;
     let mut correctness = None;
 
-    let mut plan = match managed_run_plan(&config, &format!("trial-{index}"), &trial_dir) {
+    let mut plan = match managed_run_plan(&config, &format!("trial-{index}"), &trial_dir, backend) {
         Ok(plan) => plan,
         Err(error) => {
             failure = Some(error_trial_failure(error));
@@ -938,7 +976,7 @@ fn execute_trial_steps(
             });
         }
     };
-    attach_hf_token(&mut plan, hf_token);
+    attach_hf_token(&mut plan, hf_token, backend);
     let mut server =
         match ManagedServer::start(executor, &plan.server, plan.readiness.clone(), cancellation) {
             Ok(server) => Some(server),
@@ -1186,7 +1224,7 @@ fn read_benchmark_metrics(
     BenchmarkMetrics::parse(&text, metric)
 }
 
-fn attach_hf_token(plan: &mut ManagedRunPlan, token: Option<&Secret>) {
+fn attach_hf_token(plan: &mut ManagedRunPlan, token: Option<&Secret>, backend: ExecutionBackend) {
     let Some(token) = token else {
         return;
     };
@@ -1194,8 +1232,13 @@ fn attach_hf_token(plan: &mut ManagedRunPlan, token: Option<&Secret>) {
         process
             .env_add
             .push(("HF_TOKEN".into(), token.expose().into()));
-        process.args.insert(2, "HF_TOKEN".into());
-        process.args.insert(2, "-e".into());
+        // The Docker CLI needs an explicit `-e HF_TOKEN` to forward the host
+        // variable into the container; a directly launched engine already
+        // inherits it from the child environment.
+        if backend == ExecutionBackend::Docker {
+            process.args.insert(2, "HF_TOKEN".into());
+            process.args.insert(2, "-e".into());
+        }
         process.safe_display = safe_display(&process.program, &process.args);
     }
 }
@@ -1503,7 +1546,8 @@ mod tests {
                 local_only: false,
             });
         let directory = tempfile::tempdir().unwrap();
-        let mut plan = managed_run_plan(&config, "run-1", directory.path()).unwrap();
+        let mut plan =
+            managed_run_plan(&config, "run-1", directory.path(), ExecutionBackend::Docker).unwrap();
 
         for process in [&plan.server, &plan.benchmark] {
             assert!(!process.args.iter().any(|arg| arg == "HF_TOKEN"));
@@ -1511,9 +1555,44 @@ mod tests {
         }
 
         let token = Secret::new("hf_test_secret").unwrap();
-        attach_hf_token(&mut plan, Some(&token));
+        attach_hf_token(&mut plan, Some(&token), ExecutionBackend::Docker);
         for process in [&plan.server, &plan.benchmark] {
             assert!(process.args.iter().any(|arg| arg == "HF_TOKEN"));
+            assert!(process
+                .env_add
+                .iter()
+                .any(|(name, value)| name == "HF_TOKEN" && value == token.expose()));
+            assert!(!process.safe_display.contains(token.expose()));
+        }
+    }
+
+    #[test]
+    fn in_container_hf_token_is_passed_through_child_env_not_docker_flags() {
+        let config = ConfigInput::minimal(Engine::Vllm, "repo/model")
+            .normalize()
+            .unwrap()
+            .into_executable(ResolvedImage {
+                requested: "repo/image:tag".into(),
+                immutable: "repo/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                local_only: false,
+            });
+        let directory = tempfile::tempdir().unwrap();
+        let mut plan = managed_run_plan(
+            &config,
+            "run-1",
+            directory.path(),
+            ExecutionBackend::InContainer,
+        )
+        .unwrap();
+
+        let token = Secret::new("hf_test_secret").unwrap();
+        attach_hf_token(&mut plan, Some(&token), ExecutionBackend::InContainer);
+        for process in [&plan.server, &plan.benchmark] {
+            // No Docker `-e HF_TOKEN` argument leaks into the engine command line.
+            assert!(!process
+                .args
+                .iter()
+                .any(|arg| arg == "-e" || arg == "HF_TOKEN"));
             assert!(process
                 .env_add
                 .iter()

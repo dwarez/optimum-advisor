@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    domain::{candidate::DynamicArg, engine::Engine},
+    domain::{candidate::DynamicArg, engine::Engine, run::ExecutionBackend},
     engines::parameter_introspection_script,
     error::{Error, ErrorKind, ExecutionStage, Result},
     runtime::json::parse_unique_json,
@@ -84,6 +84,7 @@ pub(crate) fn load_parameter_schema(
     refresh: bool,
     executor: &ProcessExecutor,
     cancellation: &CancellationToken,
+    backend: ExecutionBackend,
 ) -> Result<ParameterSchema> {
     let path = schema_cache_path(cache_root, engine, image_identity);
     if !refresh {
@@ -91,7 +92,7 @@ pub(crate) fn load_parameter_schema(
             return Ok(schema);
         }
     }
-    let schema = inspect_parameter_schema(engine, image_identity, executor, cancellation)?;
+    let schema = inspect_parameter_schema(engine, image_identity, executor, cancellation, backend)?;
     create_private_dir(path.parent().expect("schema cache path has a parent"))?;
     let cached = CachedParameterSchema {
         schema_version: PARAMETER_SCHEMA_VERSION,
@@ -134,24 +135,37 @@ pub(crate) fn parameter_inspection_spec(
     engine: Engine,
     image_identity: &str,
     executor: &ProcessExecutor,
+    backend: ExecutionBackend,
 ) -> ProcessSpec {
-    let args = [
-        OsString::from("run"),
-        OsString::from("--rm"),
-        OsString::from("--gpus"),
-        OsString::from("all"),
-        OsString::from("--entrypoint"),
-        OsString::from("python3"),
-        OsString::from(image_identity),
-        OsString::from("-c"),
-        OsString::from(parameter_introspection_script(engine)),
-    ];
-    let mut spec = ProcessSpec::new(executor.docker_program().to_os_string(), args)
+    let script = parameter_introspection_script(engine);
+    let (program, args, safe_display) = match backend {
+        ExecutionBackend::Docker => (
+            executor.docker_program().to_os_string(),
+            vec![
+                OsString::from("run"),
+                OsString::from("--rm"),
+                OsString::from("--gpus"),
+                OsString::from("all"),
+                OsString::from("--entrypoint"),
+                OsString::from("python3"),
+                OsString::from(image_identity),
+                OsString::from("-c"),
+                OsString::from(script),
+            ],
+            format!(
+                "docker run --rm --gpus all --entrypoint python3 {image_identity} -c <parameter introspection>"
+            ),
+        ),
+        ExecutionBackend::InContainer => (
+            OsString::from("python3"),
+            vec![OsString::from("-c"), OsString::from(script)],
+            "python3 -c <parameter introspection>".to_string(),
+        ),
+    };
+    let mut spec = ProcessSpec::new(program, args)
         .with_stage(ExecutionStage::ParameterInspection)
         .with_timeout(DEFAULT_INSPECTION_TIMEOUT)
-        .with_safe_display(format!(
-            "docker run --rm --gpus all --entrypoint python3 {image_identity} -c <parameter introspection>"
-        ));
+        .with_safe_display(safe_display);
     spec.max_stdout_bytes = DIAGNOSTIC_TAIL_BYTES as u64;
     spec.max_stderr_bytes = DIAGNOSTIC_TAIL_BYTES as u64;
     spec
@@ -162,8 +176,9 @@ pub(crate) fn inspect_parameter_schema(
     image_identity: &str,
     executor: &ProcessExecutor,
     cancellation: &CancellationToken,
+    backend: ExecutionBackend,
 ) -> Result<ParameterSchema> {
-    let spec = parameter_inspection_spec(engine, image_identity, executor);
+    let spec = parameter_inspection_spec(engine, image_identity, executor, backend);
     let outcome = executor
         .execute(&spec, cancellation)
         .map_err(map_inspection_failure)?;
@@ -375,6 +390,26 @@ mod tests {
     }
 
     #[test]
+    fn in_container_inspection_spec_runs_python_without_docker() {
+        let executor = ProcessExecutor::default();
+        let spec = parameter_inspection_spec(
+            Engine::Vllm,
+            "repo/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            &executor,
+            ExecutionBackend::InContainer,
+        );
+        let args: Vec<String> = spec
+            .args
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(spec.program.to_string_lossy(), "python3");
+        assert_eq!(args.first().map(String::as_str), Some("-c"));
+        assert!(!args.iter().any(|arg| arg == "run" || arg == "--gpus"));
+        assert_eq!(spec.safe_display, "python3 -c <parameter introspection>");
+    }
+
+    #[test]
     fn exposes_host_gpus_to_the_introspection_container() {
         let directory = tempdir().unwrap();
         let docker = directory.path().join("docker");
@@ -393,6 +428,7 @@ mod tests {
             "repo/model@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &executor,
             &CancellationToken::new(),
+            ExecutionBackend::Docker,
         )
         .unwrap();
 
@@ -418,6 +454,7 @@ mod tests {
             "repo/model@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &executor,
             &CancellationToken::new(),
+            ExecutionBackend::Docker,
         )
         .unwrap_err();
 
@@ -443,6 +480,7 @@ mod tests {
             "repo/model@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             &executor,
             &CancellationToken::new(),
+            ExecutionBackend::Docker,
         )
         .unwrap_err();
 
@@ -482,6 +520,7 @@ mod tests {
             true,
             &executor,
             &CancellationToken::new(),
+            ExecutionBackend::Docker,
         )
         .unwrap();
         let second = load_parameter_schema(
@@ -491,6 +530,7 @@ mod tests {
             false,
             &executor,
             &CancellationToken::new(),
+            ExecutionBackend::Docker,
         )
         .unwrap();
 

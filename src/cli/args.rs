@@ -10,13 +10,20 @@ use crate::{
     domain::{
         candidate::{canonical_name, validate_dynamic_name, CandidateOverrides, DynamicArg},
         engine::{Engine, Metric},
-        run::PullPolicy,
+        run::{ExecutionBackend, ExecutionTarget, PullPolicy},
     },
     error::{Error, Result},
 };
 
 const DEFAULT_RESULTS_DIR: &str = ".optimum-advisor/results";
 const DEFAULT_PARAMETER_CACHE: &str = ".optimum-advisor/params";
+/// Pinned to this binary's own version so the submitting CLI and the in-job
+/// binary agree on flags and config schema; `--hf-binary-url` overrides it.
+const DEFAULT_HF_BINARY_URL: &str = concat!(
+    "https://github.com/dwarez/optimum-advisor/releases/download/v",
+    env!("CARGO_PKG_VERSION"),
+    "/optimum-advisor-x86_64-unknown-linux-musl"
+);
 
 #[derive(Debug)]
 pub(crate) enum ParsedCli {
@@ -41,12 +48,39 @@ pub(crate) struct Invocation {
     pub kind: CommandKind,
     pub input: ConfigInput,
     pub execute: bool,
+    pub backend: ExecutionBackend,
+    pub target: ExecutionTarget,
+    pub config_path: Option<PathBuf>,
+    pub hf_jobs: HfJobsSettings,
     pub results_dir: PathBuf,
     pub parameter_cache_dir: PathBuf,
     pub refresh_parameters: bool,
     pub offline_parameters: bool,
     pub cleanup_run_id: Option<String>,
     pub cleanup_dry_run: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HfJobsSettings {
+    pub flavor: Option<String>,
+    pub timeout: Option<String>,
+    pub namespace: Option<String>,
+    pub results_bucket: Option<String>,
+    pub detach: bool,
+    pub binary_url: String,
+}
+
+impl Default for HfJobsSettings {
+    fn default() -> Self {
+        Self {
+            flavor: None,
+            timeout: None,
+            namespace: None,
+            results_bucket: None,
+            detach: false,
+            binary_url: DEFAULT_HF_BINARY_URL.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -68,6 +102,10 @@ enum CliCommand {
         config: Option<PathBuf>,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// Resolve an engine image and inspect its serving-parameter schema.
     Params {
@@ -94,6 +132,10 @@ enum CliCommand {
         config: Option<PathBuf>,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// Evaluate one serving candidate.
     Bench {
@@ -105,6 +147,12 @@ enum CliCommand {
         dry_run: bool,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
+        #[command(flatten)]
+        hf: HfJobsArgs,
     },
     /// Evaluate the bounded sweep declared in a v2 TOML file.
     Sweep {
@@ -114,6 +162,12 @@ enum CliCommand {
         results_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
+        #[command(flatten)]
+        hf: HfJobsArgs,
     },
     /// List or remove only Optimum Advisor-owned Docker containers.
     Cleanup {
@@ -127,6 +181,32 @@ enum CliCommand {
 }
 
 #[derive(Clone, Debug, Default, Args)]
+struct HfJobsArgs {
+    /// Where to run the evaluation: `local` (default) or `hf-jobs`.
+    #[arg(long = "on", default_value = "local")]
+    on: ExecutionTarget,
+    /// Hugging Face Jobs hardware flavor (e.g. `a10g-large`). Required with `--on hf-jobs`.
+    #[arg(long)]
+    hf_flavor: Option<String>,
+    /// Maximum job duration (e.g. `90m`, `2h`); forwarded to `hf jobs run --timeout`.
+    #[arg(long)]
+    hf_timeout: Option<String>,
+    /// Organization namespace to run the job under.
+    #[arg(long)]
+    hf_namespace: Option<String>,
+    /// Persist results to this read-write Hugging Face bucket
+    /// (`hf://buckets/<namespace>/<name>[/<path>]`).
+    #[arg(long)]
+    results_bucket: Option<String>,
+    /// Submit the job in the background and print only its ID.
+    #[arg(long)]
+    hf_detach: bool,
+    /// URL of the prebuilt Linux binary downloaded inside the job.
+    #[arg(long, default_value = DEFAULT_HF_BINARY_URL)]
+    hf_binary_url: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Args)]
 struct ConfigOverrides {
     #[arg(long)]
     engine: Option<Engine>,
@@ -216,10 +296,15 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
     };
 
     let invocation = match cli.command {
-        CliCommand::Plan { config, overrides } => Invocation {
+        CliCommand::Plan {
+            config,
+            overrides,
+            in_container,
+        } => Invocation {
             kind: CommandKind::Plan,
             input: merged_input(config.as_deref(), overrides)?,
             execute: false,
+            backend: execution_backend(in_container),
             ..Invocation::default_paths()
         },
         CliCommand::Params {
@@ -252,10 +337,15 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
             kind: CommandKind::Hardware,
             ..Invocation::default_paths()
         },
-        CliCommand::Serve { config, overrides } => Invocation {
+        CliCommand::Serve {
+            config,
+            overrides,
+            in_container,
+        } => Invocation {
             kind: CommandKind::Serve,
             input: merged_input(config.as_deref(), overrides)?,
             execute: true,
+            backend: execution_backend(in_container),
             ..Invocation::default_paths()
         },
         CliCommand::Bench {
@@ -263,18 +353,37 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
             results_dir,
             dry_run,
             overrides,
-        } => Invocation {
-            kind: CommandKind::Bench,
-            input: merged_input(config.as_deref(), overrides)?,
-            execute: !dry_run,
-            results_dir,
-            ..Invocation::default_paths()
-        },
+            in_container,
+            hf,
+        } => {
+            // `--image` is the one supported override: it selects the job
+            // container image and is forwarded to the in-job invocation, so it
+            // is never silently dropped like other overrides would be.
+            let has_overrides = ConfigOverrides {
+                image: None,
+                ..overrides.clone()
+            } != ConfigOverrides::default();
+            let (target, hf_jobs) = resolve_hf_jobs(hf, config.as_deref(), has_overrides)?;
+            Invocation {
+                kind: CommandKind::Bench,
+                input: merged_input(config.as_deref(), overrides)?,
+                execute: !dry_run,
+                results_dir,
+                backend: execution_backend(in_container),
+                target,
+                config_path: config,
+                hf_jobs,
+                ..Invocation::default_paths()
+            }
+        }
         CliCommand::Sweep {
             config,
             results_dir,
             dry_run,
+            in_container,
+            hf,
         } => {
+            let (target, hf_jobs) = resolve_hf_jobs(hf, Some(config.as_path()), false)?;
             let input = ConfigInput::try_from(load_config(&config)?)?;
             if input.sweep.is_none() {
                 return Err(Error::validation(
@@ -286,6 +395,10 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
                 input,
                 execute: !dry_run,
                 results_dir,
+                backend: execution_backend(in_container),
+                target,
+                config_path: Some(config),
+                hf_jobs,
                 ..Invocation::default_paths()
             }
         }
@@ -309,6 +422,10 @@ impl Invocation {
             kind: CommandKind::Hardware,
             input: ConfigInput::default(),
             execute: false,
+            backend: ExecutionBackend::Docker,
+            target: ExecutionTarget::Local,
+            config_path: None,
+            hf_jobs: HfJobsSettings::default(),
             results_dir: PathBuf::from(DEFAULT_RESULTS_DIR),
             parameter_cache_dir: PathBuf::from(DEFAULT_PARAMETER_CACHE),
             refresh_parameters: false,
@@ -317,6 +434,56 @@ impl Invocation {
             cleanup_dry_run: false,
         }
     }
+}
+
+fn execution_backend(in_container: bool) -> ExecutionBackend {
+    if in_container {
+        ExecutionBackend::InContainer
+    } else {
+        ExecutionBackend::Docker
+    }
+}
+
+fn resolve_hf_jobs(
+    hf: HfJobsArgs,
+    config: Option<&std::path::Path>,
+    has_overrides: bool,
+) -> Result<(ExecutionTarget, HfJobsSettings)> {
+    let target = hf.on;
+    let settings = HfJobsSettings {
+        flavor: hf.hf_flavor,
+        timeout: hf.hf_timeout,
+        namespace: hf.hf_namespace,
+        results_bucket: hf.results_bucket,
+        detach: hf.hf_detach,
+        binary_url: hf.hf_binary_url,
+    };
+    match target {
+        ExecutionTarget::Local => {
+            if settings.flavor.is_some()
+                || settings.timeout.is_some()
+                || settings.namespace.is_some()
+                || settings.results_bucket.is_some()
+                || settings.detach
+            {
+                return Err(Error::usage("--hf-* options require --on hf-jobs"));
+            }
+        }
+        ExecutionTarget::HfJobs => {
+            if settings.flavor.is_none() {
+                return Err(Error::usage("--on hf-jobs requires --hf-flavor"));
+            }
+            if config.is_none() {
+                return Err(Error::usage("--on hf-jobs requires --config"));
+            }
+            if has_overrides {
+                return Err(Error::usage(
+                    "--on hf-jobs supports only the --image CLI override; put other settings in the config file",
+                ));
+            }
+        }
+    }
+    Ok((target, settings))
 }
 
 fn merged_input(

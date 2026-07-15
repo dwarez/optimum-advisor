@@ -1,8 +1,13 @@
-use std::{ffi::OsString, net::IpAddr, path::Path, time::Duration};
+use std::{
+    ffi::OsString,
+    net::{IpAddr, Ipv4Addr},
+    path::Path,
+    time::Duration,
+};
 
 use crate::{
     config::ExecutableConfig,
-    domain::{candidate::DynamicArg, engine::Engine},
+    domain::{candidate::DynamicArg, engine::Engine, run::ExecutionBackend},
     error::{Error, ExecutionStage, Result},
     runtime::{docker::OwnedContainer, process::ProcessSpec, server::ReadinessProbe},
 };
@@ -17,8 +22,16 @@ pub(crate) fn managed_run_plan(
     config: &ExecutableConfig,
     run_id: &str,
     artifact_dir: &Path,
+    backend: ExecutionBackend,
 ) -> Result<ManagedRunPlan> {
     validate_run_id(run_id)?;
+    Ok(match backend {
+        ExecutionBackend::Docker => docker_run_plan(config, run_id, artifact_dir),
+        ExecutionBackend::InContainer => in_container_run_plan(config, artifact_dir),
+    })
+}
+
+fn docker_run_plan(config: &ExecutableConfig, run_id: &str, artifact_dir: &Path) -> ManagedRunPlan {
     let server_container =
         OwnedContainer::new(format!("optimum-advisor-{run_id}-server"), run_id, "server");
     let benchmark_container = OwnedContainer::new(
@@ -64,7 +77,12 @@ pub(crate) fn managed_run_plan(
         }),
         OsString::from(&config.image.immutable),
     ]);
-    append_benchmark_command(config, &mut benchmark_args);
+    append_benchmark_command(
+        config,
+        &mut benchmark_args,
+        &readiness_host(config.runtime.bind_host),
+        config.runtime.port,
+    );
     let mut benchmark = ProcessSpec::new("docker", benchmark_args)
         .with_stage(ExecutionStage::Benchmark)
         .with_timeout(Duration::from_secs(config.runtime.benchmark_timeout_secs))
@@ -77,7 +95,7 @@ pub(crate) fn managed_run_plan(
     benchmark.max_stderr_bytes = config.runtime.max_process_output_bytes;
     benchmark.safe_display = safe_display(&benchmark.program, &benchmark.args);
 
-    Ok(ManagedRunPlan {
+    ManagedRunPlan {
         server,
         benchmark,
         readiness: ReadinessProbe::new(
@@ -86,7 +104,71 @@ pub(crate) fn managed_run_plan(
             Some("/v1/models".to_string()),
             Duration::from_secs(config.runtime.startup_timeout_secs),
         ),
-    })
+    }
+}
+
+fn in_container_run_plan(config: &ExecutableConfig, artifact_dir: &Path) -> ManagedRunPlan {
+    // The surrounding container already provides the engine image, so the
+    // server binds directly on the loopback port and the benchmark connects to
+    // it without a published Docker port mapping.
+    let port = container_port(config.engine);
+    let host = "127.0.0.1";
+
+    // The Docker path relies on the image entrypoint (`vllm serve`) for vLLM and
+    // an explicit `--entrypoint python3` for SGLang. Run the same programs
+    // directly, supplying the leading tokens the entrypoint would have added.
+    let (server_program, server_leading): (&str, &[&str]) = match config.engine {
+        Engine::Vllm => ("vllm", &["serve"]),
+        Engine::Sglang => ("python3", &[]),
+    };
+    let mut server_args: Vec<OsString> = server_leading.iter().map(OsString::from).collect();
+    append_server_command(config, &mut server_args);
+    let mut server = ProcessSpec::new(server_program, server_args)
+        .with_stage(ExecutionStage::Server)
+        .with_artifacts(
+            artifact_dir.join("server.stdout.log"),
+            artifact_dir.join("server.stderr.log"),
+        );
+    server.max_stdout_bytes = config.runtime.max_process_output_bytes;
+    server.max_stderr_bytes = config.runtime.max_process_output_bytes;
+    // Docker pins explicit devices with `--gpus device=...`; the direct process
+    // equivalent is CUDA_VISIBLE_DEVICES. Count-based selection uses whatever the
+    // surrounding container exposes, matching how the job flavor allocates GPUs.
+    if !config.runtime.gpu_devices.is_empty() {
+        server.env_add.push((
+            OsString::from("CUDA_VISIBLE_DEVICES"),
+            OsString::from(config.runtime.gpu_devices.join(",")),
+        ));
+    }
+    server.safe_display = safe_display(&server.program, &server.args);
+
+    let benchmark_program = match config.engine {
+        Engine::Vllm => "vllm",
+        Engine::Sglang => "python3",
+    };
+    let mut benchmark_args: Vec<OsString> = Vec::new();
+    append_benchmark_command(config, &mut benchmark_args, host, port);
+    let mut benchmark = ProcessSpec::new(benchmark_program, benchmark_args)
+        .with_stage(ExecutionStage::Benchmark)
+        .with_timeout(Duration::from_secs(config.runtime.benchmark_timeout_secs))
+        .with_artifacts(
+            artifact_dir.join("benchmark.stdout.log"),
+            artifact_dir.join("benchmark.stderr.log"),
+        );
+    benchmark.max_stdout_bytes = config.runtime.max_process_output_bytes;
+    benchmark.max_stderr_bytes = config.runtime.max_process_output_bytes;
+    benchmark.safe_display = safe_display(&benchmark.program, &benchmark.args);
+
+    ManagedRunPlan {
+        server,
+        benchmark,
+        readiness: ReadinessProbe::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            port,
+            Some("/v1/models".to_string()),
+            Duration::from_secs(config.runtime.startup_timeout_secs),
+        ),
+    }
 }
 
 fn docker_run_prefix(config: &ExecutableConfig, container: &OwnedContainer) -> Vec<OsString> {
@@ -165,7 +247,12 @@ fn append_server_command(config: &ExecutableConfig, args: &mut Vec<OsString>) {
     append_dynamic(args, &config.serve_args);
 }
 
-fn append_benchmark_command(config: &ExecutableConfig, args: &mut Vec<OsString>) {
+fn append_benchmark_command(
+    config: &ExecutableConfig,
+    args: &mut Vec<OsString>,
+    client_host: &str,
+    client_port: u16,
+) {
     match config.engine {
         Engine::Vllm => args.extend([
             OsString::from("bench"),
@@ -181,8 +268,8 @@ fn append_benchmark_command(config: &ExecutableConfig, args: &mut Vec<OsString>)
         ]),
     }
     append_value(args, "--model", &config.model);
-    append_value(args, "--host", readiness_host(config.runtime.bind_host));
-    append_value(args, "--port", config.runtime.port);
+    append_value(args, "--host", client_host);
+    append_value(args, "--port", client_port);
     if config.engine == Engine::Vllm {
         append_value(args, "--endpoint", "/v1/completions");
     }
@@ -295,7 +382,8 @@ mod tests {
             });
         let directory = tempdir().unwrap();
 
-        let plan = managed_run_plan(&config, "run-1", directory.path()).unwrap();
+        let plan =
+            managed_run_plan(&config, "run-1", directory.path(), ExecutionBackend::Docker).unwrap();
         let server = strings(&plan.server.args);
         let benchmark = strings(&plan.benchmark.args);
 
@@ -339,7 +427,8 @@ mod tests {
             });
         let directory = tempdir().unwrap();
 
-        let plan = managed_run_plan(&config, "run-2", directory.path()).unwrap();
+        let plan =
+            managed_run_plan(&config, "run-2", directory.path(), ExecutionBackend::Docker).unwrap();
         let server = strings(&plan.server.args);
 
         assert!(server.contains(&"[::1]:8000:30000".to_string()));
@@ -359,6 +448,155 @@ mod tests {
         assert!(server.contains(&"--mem-fraction-static".to_string()));
         assert!(server.contains(&"--chunked-prefill-size".to_string()));
         assert!(server.contains(&"--max-running-requests".to_string()));
+    }
+
+    #[test]
+    fn in_container_vllm_runs_engine_binaries_directly_on_loopback() {
+        let config = ConfigInput::minimal(Engine::Vllm, "repo/model")
+            .normalize()
+            .unwrap()
+            .into_executable(ResolvedImage {
+                requested: "repo/server:latest".into(),
+                immutable: "repo/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                local_only: false,
+            });
+        let directory = tempdir().unwrap();
+
+        let plan = managed_run_plan(
+            &config,
+            "run-1",
+            directory.path(),
+            ExecutionBackend::InContainer,
+        )
+        .unwrap();
+        let server = strings(&plan.server.args);
+        let benchmark = strings(&plan.benchmark.args);
+
+        // Engine binaries are launched directly; no Docker wrapper or image.
+        assert_eq!(plan.server.program.to_string_lossy(), "vllm");
+        assert_eq!(server.first().map(String::as_str), Some("serve"));
+        assert!(server.contains(&"--model".to_string()));
+        assert!(server.contains(&"repo/model".to_string()));
+        for token in ["docker", "run", "--gpus", "--ipc=host", "-p"] {
+            assert!(!server.contains(&token.to_string()), "unexpected {token}");
+        }
+        assert!(!server.contains(&config.image.immutable));
+        assert!(plan.server.owned_container.is_none());
+
+        assert_eq!(plan.benchmark.program.to_string_lossy(), "vllm");
+        assert_eq!(benchmark.first().map(String::as_str), Some("bench"));
+        assert_eq!(benchmark.get(1).map(String::as_str), Some("serve"));
+        assert!(benchmark.contains(&"127.0.0.1".to_string()));
+        assert!(benchmark.contains(&"8000".to_string()));
+        assert!(!benchmark.contains(&"--entrypoint".to_string()));
+        assert!(plan.benchmark.owned_container.is_none());
+
+        assert_eq!(plan.readiness.address.port(), 8000);
+        assert!(plan.readiness.address.ip().is_loopback());
+    }
+
+    #[test]
+    fn in_container_sglang_uses_python_module_and_loopback_port() {
+        let config = ConfigInput::minimal(Engine::Sglang, "repo/model")
+            .normalize()
+            .unwrap()
+            .into_executable(ResolvedImage {
+                requested: "server:tag".into(),
+                immutable: "docker.io/library/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                local_only: false,
+            });
+        let directory = tempdir().unwrap();
+
+        let plan = managed_run_plan(
+            &config,
+            "run-2",
+            directory.path(),
+            ExecutionBackend::InContainer,
+        )
+        .unwrap();
+        let server = strings(&plan.server.args);
+        let benchmark = strings(&plan.benchmark.args);
+
+        assert_eq!(plan.server.program.to_string_lossy(), "python3");
+        assert_eq!(server.first().map(String::as_str), Some("-m"));
+        assert_eq!(
+            server.get(1).map(String::as_str),
+            Some("sglang.launch_server")
+        );
+        assert!(server.contains(&"--model-path".to_string()));
+        assert!(plan.server.owned_container.is_none());
+
+        assert_eq!(plan.benchmark.program.to_string_lossy(), "python3");
+        assert_eq!(benchmark.first().map(String::as_str), Some("-m"));
+        assert_eq!(
+            benchmark.get(1).map(String::as_str),
+            Some("sglang.bench_serving")
+        );
+        assert!(benchmark.contains(&"127.0.0.1".to_string()));
+        assert!(benchmark.contains(&"30000".to_string()));
+        assert!(plan.benchmark.owned_container.is_none());
+
+        assert_eq!(plan.readiness.address.port(), 30000);
+        assert!(plan.readiness.address.ip().is_loopback());
+    }
+
+    #[test]
+    fn in_container_pins_explicit_gpu_devices_via_cuda_visible_devices() {
+        let mut input = ConfigInput::minimal(Engine::Vllm, "repo/model");
+        input.runtime.gpu_devices = Some(vec!["1".into(), "3".into()]);
+        input.runtime.gpus = Some(2);
+        input.candidate.tensor_parallelism = Some(2);
+        let config = input.normalize().unwrap().into_executable(ResolvedImage {
+            requested: "repo/server:latest".into(),
+            immutable: "repo/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            local_only: false,
+        });
+        let directory = tempdir().unwrap();
+
+        let plan = managed_run_plan(
+            &config,
+            "run-3",
+            directory.path(),
+            ExecutionBackend::InContainer,
+        )
+        .unwrap();
+        assert!(plan
+            .server
+            .env_add
+            .iter()
+            .any(|(name, value)| name == "CUDA_VISIBLE_DEVICES" && value == "1,3"));
+        // The client does not need GPUs, so it is left unpinned.
+        assert!(plan
+            .benchmark
+            .env_add
+            .iter()
+            .all(|(name, _)| name != "CUDA_VISIBLE_DEVICES"));
+    }
+
+    #[test]
+    fn in_container_omits_cuda_visible_devices_for_count_based_selection() {
+        let config = ConfigInput::minimal(Engine::Vllm, "repo/model")
+            .normalize()
+            .unwrap()
+            .into_executable(ResolvedImage {
+                requested: "repo/server:latest".into(),
+                immutable: "repo/server@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                local_only: false,
+            });
+        let directory = tempdir().unwrap();
+
+        let plan = managed_run_plan(
+            &config,
+            "run-4",
+            directory.path(),
+            ExecutionBackend::InContainer,
+        )
+        .unwrap();
+        assert!(plan
+            .server
+            .env_add
+            .iter()
+            .all(|(name, _)| name != "CUDA_VISIBLE_DEVICES"));
     }
 
     fn strings(values: &[std::ffi::OsString]) -> Vec<String> {

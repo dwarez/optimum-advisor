@@ -4,6 +4,7 @@ mod config;
 mod domain;
 mod engines;
 mod error;
+mod hf_jobs;
 mod inspection;
 mod leaderboard;
 mod mcp;

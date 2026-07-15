@@ -143,6 +143,24 @@ pub(crate) fn resolve_image(
     })
 }
 
+/// Build an image identity for in-container execution without contacting Docker.
+///
+/// The surrounding container already provides the engine image, so its
+/// reference is treated as the immutable identity directly; no digest is
+/// resolved and no pull is attempted.
+pub(crate) fn in_container_image_identity(requested: &str) -> Result<DockerImageIdentity> {
+    if requested.trim().is_empty() {
+        return Err(image_error("image reference must not be empty"));
+    }
+    Ok(DockerImageIdentity {
+        requested: requested.to_string(),
+        image_id: requested.to_string(),
+        repository_digest: None,
+        immutable: requested.to_string(),
+        local_only: true,
+    })
+}
+
 pub(crate) fn cleanup_owned_containers(
     run_id: Option<&str>,
     dry_run: bool,
