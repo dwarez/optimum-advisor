@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to build and attach the binary to"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  linux-musl:
+    name: Publish static Linux x86_64 binary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Install stable Rust with musl target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-unknown-linux-musl
+      - name: Install musl build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build static release binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+      - name: Stage artifact and checksum
+        run: |
+          set -eu
+          asset="optimum-advisor-x86_64-unknown-linux-musl"
+          bin="target/x86_64-unknown-linux-musl/release/optimum-advisor"
+          test -x "$bin"
+          strip "$bin"
+          mkdir -p dist
+          install -m 0755 "$bin" "dist/${asset}"
+          ( cd dist && sha256sum "$asset" > "${asset}.sha256" )
+          ls -l dist
+      - name: Publish binary to the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
+          fi
+          gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
