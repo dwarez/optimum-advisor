@@ -12,7 +12,7 @@ use crate::{
     config::{ConfigInput, ExecutableConfig, RuntimeInput},
     domain::{
         engine::{Engine, Metric},
-        run::{PullPolicy, ResolvedImage},
+        run::{ExecutionBackend, PullPolicy, ResolvedImage},
     },
     error::{Error, ErrorKind, ExecutionStage, Result},
     inspection::{
@@ -324,6 +324,7 @@ fn inspect_engine_tool(
             args.refresh,
             &executor,
             cancellation,
+            ExecutionBackend::Docker,
         )?;
         (identity.resolved(), schema)
     };
@@ -376,6 +377,7 @@ fn validate_config_tool(
             false,
             &executor,
             cancellation,
+            ExecutionBackend::Docker,
         )?;
         (identity.resolved(), schema)
     };
@@ -484,6 +486,7 @@ fn execution_invocation(args: ExecutionArgs, kind: RunKind) -> Invocation {
         },
         input: args.config,
         execute: true,
+        backend: ExecutionBackend::Docker,
         results_dir: args
             .results_dir
             .unwrap_or_else(|| PathBuf::from(DEFAULT_RESULTS_DIR)),

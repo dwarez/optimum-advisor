@@ -13,7 +13,10 @@ invent configurations or enforce service-level objectives.
 ## Requirements
 
 - Rust **1.85.0** or newer to build from source.
-- Docker with the NVIDIA container runtime (`docker run --gpus ...`).
+- Docker with the NVIDIA container runtime (`docker run --gpus ...`) for the
+  default execution backend. The `--in-container` backend instead expects the
+  engine CLI (`vllm`, or `python3 -m sglang...`) on `PATH` inside the current
+  container; see [Execution backends](#execution-backends).
 - NVIDIA drivers and `nvidia-smi` on execution hosts.
 - The correctness environment when correctness is enabled:
   `./scripts/setup-correctness-env.sh`.
@@ -184,12 +187,45 @@ Run `optimum-advisor <command> --help` for the exact options, except `mcp`,
 which intentionally accepts no arguments and reserves stdout for protocol
 frames.
 
+### Execution backends
+
+`plan`, `serve`, `bench`, and `sweep` launch the engine server and benchmark one
+of two ways, selected with `--in-container`:
+
+- **Docker (default):** every engine invocation is wrapped in `docker run --gpus
+  ... <image> ...` on the local host. The image is resolved to an immutable
+  identity, the server port is published, and the run owns and cleans up its
+  containers.
+- **In-container (`--in-container`):** the engine binaries (`vllm` /
+  `python3 -m sglang...`) run directly as child processes bound on loopback,
+  with no Docker daemon, image resolution, or container cleanup. Use it inside a
+  container that already provides the engine image — for example a Hugging Face
+  Job whose image is `vllm/vllm-openai` — where nested Docker is unavailable.
+
+Preview the exact commands for either backend without executing anything:
+
+```bash
+optimum-advisor plan --config examples/bench.toml
+optimum-advisor plan --config examples/bench.toml --in-container
+```
+
+Both backends share the same validation, correctness suite, ranking, schema-v2
+report, and cancellation paths; only server and benchmark launch and image
+handling differ. Under `--in-container` the Hugging Face token, when present, is
+passed through the child environment rather than a `docker run -e` flag, and the
+engine parameter schema is inspected by running `python3` directly instead of
+through Docker.
+
 ### GPU selection
 
 `runtime.gpus` selects a count. `runtime.gpu_devices` or repeated
 `--gpu-device` values select explicit GPU indexes/UUIDs. Explicit devices must
 be nonempty and unique, and their count must match `gpus`. Tensor parallelism
 must be nonzero, cannot exceed the selected count, and must divide it evenly.
+
+Under `--in-container`, explicit `gpu_devices` are exported to the server as
+`CUDA_VISIBLE_DEVICES`; count-based `gpus` selection uses whatever GPUs the
+surrounding container exposes.
 
 ### Timeouts, cancellation, and cleanup
 
@@ -367,7 +403,9 @@ CI also runs RustSec `cargo audit` and ShellCheck.
 ## Explicit limitations
 
 - execution is sequential and local, not distributed;
-- Docker and NVIDIA GPU support are required for real serving runs;
+- the default Docker backend requires Docker and NVIDIA GPU support for real
+  serving runs; the `--in-container` backend drops the Docker dependency but
+  still needs the engine CLI and visible GPUs inside the container;
 - model-memory estimation depends on an optional external `hf-mem` command;
 - correctness depends on the separately installed pinned Python tools;
 - no advisor heuristics currently generate candidates from hardware or memory

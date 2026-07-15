@@ -10,7 +10,7 @@ use crate::{
     domain::{
         candidate::{canonical_name, validate_dynamic_name, CandidateOverrides, DynamicArg},
         engine::{Engine, Metric},
-        run::PullPolicy,
+        run::{ExecutionBackend, PullPolicy},
     },
     error::{Error, Result},
 };
@@ -41,6 +41,7 @@ pub(crate) struct Invocation {
     pub kind: CommandKind,
     pub input: ConfigInput,
     pub execute: bool,
+    pub backend: ExecutionBackend,
     pub results_dir: PathBuf,
     pub parameter_cache_dir: PathBuf,
     pub refresh_parameters: bool,
@@ -68,6 +69,10 @@ enum CliCommand {
         config: Option<PathBuf>,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// Resolve an engine image and inspect its serving-parameter schema.
     Params {
@@ -94,6 +99,10 @@ enum CliCommand {
         config: Option<PathBuf>,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// Evaluate one serving candidate.
     Bench {
@@ -105,6 +114,10 @@ enum CliCommand {
         dry_run: bool,
         #[command(flatten)]
         overrides: ConfigOverrides,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// Evaluate the bounded sweep declared in a v2 TOML file.
     Sweep {
@@ -114,6 +127,10 @@ enum CliCommand {
         results_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Run engine processes directly instead of via Docker, for use inside a
+        /// container that already provides the engine image (e.g. a Hugging Face Job).
+        #[arg(long)]
+        in_container: bool,
     },
     /// List or remove only Optimum Advisor-owned Docker containers.
     Cleanup {
@@ -216,10 +233,15 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
     };
 
     let invocation = match cli.command {
-        CliCommand::Plan { config, overrides } => Invocation {
+        CliCommand::Plan {
+            config,
+            overrides,
+            in_container,
+        } => Invocation {
             kind: CommandKind::Plan,
             input: merged_input(config.as_deref(), overrides)?,
             execute: false,
+            backend: execution_backend(in_container),
             ..Invocation::default_paths()
         },
         CliCommand::Params {
@@ -252,10 +274,15 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
             kind: CommandKind::Hardware,
             ..Invocation::default_paths()
         },
-        CliCommand::Serve { config, overrides } => Invocation {
+        CliCommand::Serve {
+            config,
+            overrides,
+            in_container,
+        } => Invocation {
             kind: CommandKind::Serve,
             input: merged_input(config.as_deref(), overrides)?,
             execute: true,
+            backend: execution_backend(in_container),
             ..Invocation::default_paths()
         },
         CliCommand::Bench {
@@ -263,17 +290,20 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
             results_dir,
             dry_run,
             overrides,
+            in_container,
         } => Invocation {
             kind: CommandKind::Bench,
             input: merged_input(config.as_deref(), overrides)?,
             execute: !dry_run,
             results_dir,
+            backend: execution_backend(in_container),
             ..Invocation::default_paths()
         },
         CliCommand::Sweep {
             config,
             results_dir,
             dry_run,
+            in_container,
         } => {
             let input = ConfigInput::try_from(load_config(&config)?)?;
             if input.sweep.is_none() {
@@ -286,6 +316,7 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
                 input,
                 execute: !dry_run,
                 results_dir,
+                backend: execution_backend(in_container),
                 ..Invocation::default_paths()
             }
         }
@@ -309,6 +340,7 @@ impl Invocation {
             kind: CommandKind::Hardware,
             input: ConfigInput::default(),
             execute: false,
+            backend: ExecutionBackend::Docker,
             results_dir: PathBuf::from(DEFAULT_RESULTS_DIR),
             parameter_cache_dir: PathBuf::from(DEFAULT_PARAMETER_CACHE),
             refresh_parameters: false,
@@ -316,6 +348,14 @@ impl Invocation {
             cleanup_run_id: None,
             cleanup_dry_run: false,
         }
+    }
+}
+
+fn execution_backend(in_container: bool) -> ExecutionBackend {
+    if in_container {
+        ExecutionBackend::InContainer
+    } else {
+        ExecutionBackend::Docker
     }
 }
 

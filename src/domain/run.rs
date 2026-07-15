@@ -35,6 +35,23 @@ impl fmt::Display for PullPolicy {
     }
 }
 
+/// Selects how engine server and benchmark commands are launched.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ExecutionBackend {
+    /// Wrap each engine invocation in `docker run --gpus ... <image> ...`.
+    ///
+    /// Requires a local Docker daemon with the NVIDIA container runtime.
+    #[default]
+    Docker,
+    /// Run the engine binary directly in the current process namespace.
+    ///
+    /// Assumes the surrounding container already provides the engine image
+    /// (for example a Hugging Face Job whose image is `vllm/vllm-openai`),
+    /// so no Docker daemon, image resolution, or container cleanup applies.
+    InContainer,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 pub(crate) struct ResolvedImage {
     pub requested: String,
