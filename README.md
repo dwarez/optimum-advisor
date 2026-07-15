@@ -453,6 +453,28 @@ sh -n scripts/install.sh scripts/setup-correctness-env.sh
 
 CI also runs RustSec `cargo audit` and ShellCheck.
 
+## Releases
+
+Releases are fully automated with [release-plz](https://release-plz.dev) in
+git-only mode (the crate is not published to crates.io):
+
+1. Every push to `main` opens or updates a release PR that bumps the version
+   and `CHANGELOG.md` from the commits since the last tag.
+2. Merging that PR makes CI create the `v<version>` git tag and the GitHub
+   release, then dispatches the workflow that builds and attaches the prebuilt
+   static Linux binary — the artifact the `--on hf-jobs` launcher downloads.
+
+Conventional commits drive the bump: `feat:` bumps minor (also on `0.x`),
+`fix:` and other messages bump patch, and `!`/`BREAKING CHANGE` marks a
+breaking release. This repository's `add:`/`change:`/`refactor:` prefixes are
+grouped in the changelog and produce patch bumps. Manually pushed `v*` tags
+still trigger the binary build directly.
+
+One-time repository setting: enable "Allow GitHub Actions to create and
+approve pull requests" (Settings → Actions → General) so the release PR can be
+opened with the default `GITHUB_TOKEN`. Release PRs opened with that token do
+not trigger PR CI; the gates run when the merge lands on `main`.
+
 ## Explicit limitations
 
 - execution is sequential and local, not distributed;
