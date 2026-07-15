@@ -1,0 +1,37 @@
+# Release automation (https://release-plz.dev).
+#
+# On every push to main, CI opens/updates a release PR that bumps the version
+# and CHANGELOG.md from the commits since the last tag. Merging that PR makes
+# CI create the `v{version}` git tag and the GitHub release; the binary build
+# workflow then attaches the prebuilt musl artifact to it.
+
+[workspace]
+# Git-only mode: this crate is not on crates.io (Cargo.toml sets
+# `publish = false`, which release-plz would otherwise skip entirely), so
+# versions are determined from git tags and `cargo publish` never runs;
+# release-plz manages the version bump, changelog, git tag, and GitHub release.
+git_only = true
+# Keep `feat:` commits bumping the minor version also while on 0.x.
+features_always_increment_minor = true
+# The tag format is load-bearing: the hf-jobs launcher downloads
+# `releases/download/v{CARGO_PKG_VERSION}/...` inside the job.
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+
+[changelog]
+# Group commits using this repository's message conventions alongside the
+# standard conventional-commit types. Version bumps still follow conventional
+# commits: `feat:` bumps minor, `fix:` and everything else bump patch, and a
+# `!`/BREAKING CHANGE footer bumps major.
+commit_parsers = [
+    { message = "^feat", group = "Added" },
+    { message = "^add", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^change", group = "Changed" },
+    { message = "^refactor", group = "Changed" },
+    { message = "^remove", group = "Removed" },
+    { message = "^doc", group = "Documentation" },
+    { message = "^perf", group = "Performance" },
+    { message = "^chore|^ci|^test", group = "Miscellaneous" },
+    { message = ".*", group = "Other" },
+]
