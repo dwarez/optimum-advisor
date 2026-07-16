@@ -6,10 +6,11 @@
 # workflow then attaches the prebuilt musl artifact to it.
 
 [workspace]
-# Git-only mode: this crate is not on crates.io (Cargo.toml sets
-# `publish = false`, which release-plz would otherwise skip entirely), so
-# versions are determined from git tags and `cargo publish` never runs;
-# release-plz manages the version bump, changelog, git tag, and GitHub release.
+# Git-only mode: this crate is not on crates.io, so versions are determined
+# from git tags and `cargo publish` never runs; release-plz manages the
+# version bump, changelog, git tag, and GitHub release. Note: Cargo.toml must
+# NOT set `publish = false` — the `release` command silently skips
+# unpublishable packages, even in git-only mode.
 git_only = true
 # Keep `feat:` commits bumping the minor version also while on 0.x.
 features_always_increment_minor = true
