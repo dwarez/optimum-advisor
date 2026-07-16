@@ -1,78 +1,35 @@
 # Optimum Advisor
 
-Optimum Advisor is a production-hardened runner for comparing vLLM and
-SGLang serving configurations on NVIDIA GPU hosts — locally via Docker, or
-remotely on Hugging Face Jobs. It resolves container images to immutable
-identities, validates engine arguments against the selected image, runs
-correctness and engine-native benchmarks, preserves failed trials, and writes
-an atomic schema-v2 report.
+How you serve a model — engine, parallelism, memory budget, batching, cache
+settings — can move throughput and latency by large factors, and the only way
+to know what works on *your* model and *your* hardware is to measure it.
+Optimum Advisor makes that measurement systematic: declare candidate serving
+configurations, and it serves each one, checks output quality, runs the
+engine's own benchmark, ranks the candidates, and leaves you a durable report
+plus a ready-to-run winning configuration.
 
-It is **not** a production advisor or cluster scheduler. Candidate execution is
-sequential. Selection ranks only observed candidates; it does not yet invent
-configurations or enforce service-level objectives.
+Today it drives **vLLM** and **SGLang**, running either on your own NVIDIA GPU
+host via Docker or on [Hugging Face Jobs](#run-on-hugging-face-jobs) with no
+GPU of your own. It is not a cluster scheduler or an automatic tuner:
+candidates run one at a time, and ranking covers only the candidates you
+declare.
 
-**Contents**
+**Jump to:**
+[Quickstart](#quickstart) ·
+[Configuration](#configuration) ·
+[Running benchmarks](#running-benchmarks) ·
+[Hugging Face Jobs](#run-on-hugging-face-jobs) ·
+[Results](#results) ·
+[Correctness](#correctness-checks) ·
+[MCP server](#mcp-server) ·
+[Limitations](#limitations) ·
+[Contributing](CONTRIBUTING.md)
 
-- [Getting started](#getting-started)
-  — [Requirements](#requirements)
-  · [Installation](#installation)
-  · [Safe first run](#safe-first-run)
-- [Configuration](#configuration)
-  — [Schema-v2 TOML](#schema-v2-toml)
-  · [Sweeps](#sweeps)
-  · [Precedence](#precedence)
-  · [GPU selection](#gpu-selection)
-- [Running evaluations](#running-evaluations)
-  — [Commands](#commands)
-  · [Execution backends](#execution-backends)
-  · [Running on Hugging Face Jobs](#running-on-hugging-face-jobs)
-  · [Timeouts, cancellation, and cleanup](#timeouts-cancellation-and-cleanup)
-  · [Reports and artifacts](#reports-and-artifacts)
-  · [Correctness](#correctness)
-  · [Secrets and leaderboard submission](#secrets-and-leaderboard-submission)
-- [MCP server](#mcp-server)
-- [Development](#development)
-  — [Development gates](#development-gates)
-  · [Real GPU-host acceptance](#real-gpu-host-acceptance)
-  · [Releases](#releases)
-- [Explicit limitations](#explicit-limitations)
+## Quickstart
 
-## Getting started
+### 1. Install
 
-### Requirements
-
-- Docker with the NVIDIA container runtime (`docker run --gpus ...`) for the
-  default execution backend. The `--in-container` backend instead expects the
-  engine CLI (`vllm`, or `python3 -m sglang...`) on `PATH` inside the current
-  container; see [Execution backends](#execution-backends).
-- NVIDIA drivers and `nvidia-smi` on execution hosts.
-- Rust **1.85.0** or newer to build from source (not needed for the prebuilt
-  binaries).
-- The correctness environment when correctness is enabled:
-  `./scripts/setup-correctness-env.sh`.
-- Optional: `hf-mem`, `uvx hf-mem`, or a configured command for model-memory
-  estimates. Missing optional estimation is recorded as a typed warning;
-  `model_memory.required = true` makes it a preflight failure.
-- Optional: a Hugging Face token for gated/private models or leaderboard
-  submission. Public model execution does not require a token.
-- Optional: the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli)
-  and a logged-in account to submit runs with `--on hf-jobs`; see
-  [Running on Hugging Face Jobs](#running-on-hugging-face-jobs).
-
-### Installation
-
-#### Prebuilt binaries
-
-Every [release](https://github.com/dwarez/optimum-advisor/releases) attaches
-per-target binaries with `.sha256` checksums:
-
-| Platform | Asset |
-| --- | --- |
-| Linux x86_64 (static musl; also downloaded inside Hugging Face Jobs) | `optimum-advisor-x86_64-unknown-linux-musl` |
-| macOS Apple Silicon | `optimum-advisor-aarch64-apple-darwin` |
-| macOS Intel | `optimum-advisor-x86_64-apple-darwin` |
-
-Download the asset for your platform, verify the checksum, and install:
+Prebuilt binaries (Linux x86_64, macOS arm64/x86_64):
 
 ```bash
 target=$(case "$(uname -s)-$(uname -m)" in
@@ -86,491 +43,330 @@ shasum -a 256 -c "optimum-advisor-$target.sha256"   # on Linux: sha256sum -c
 install -m 0755 "optimum-advisor-$target" ~/.local/bin/optimum-advisor
 ```
 
-Pin a specific version by replacing `latest/download` with
-`download/v<version>`. For other platforms, build from source.
+Or build from source (Rust 1.85+): `cargo install --git
+https://github.com/dwarez/optimum-advisor.git --locked`. Pin a version by
+replacing `latest/download` with `download/v<version>`.
 
-#### From source (any platform)
-
-From this checkout:
-
-```bash
-./scripts/install.sh
-```
-
-Equivalent command:
-
-```bash
-cargo install --path . --locked --force
-```
-
-From Git:
-
-```bash
-cargo install --git https://github.com/dwarez/optimum-advisor.git --locked --force
-```
-
-Uninstall with `cargo uninstall optimum-advisor`.
-
-### Safe first run
-
-Dry-run planning performs local invariant checks and renders the exact commands.
-It does not pull images, inspect hardware, start Docker containers, contact the
-leaderboard, or require credentials:
-
-```bash
-optimum-advisor plan --config examples/bench.toml
-optimum-advisor bench --config examples/bench.toml --dry-run
-optimum-advisor sweep --config examples/sweep.toml --dry-run
-```
-
-Inspect the host and the selected engine image before execution:
-
-```bash
-optimum-advisor hardware
-optimum-advisor params \
-  --engine vllm \
-  --image vllm/vllm-openai:latest \
-  --cache-dir .optimum-advisor/params \
-  --refresh
-```
-
-`params` resolves a tag to a repository digest or image ID before using it as a
-cache identity. `params --offline` performs no Docker or network operation and
-requires both an immutable `repo@sha256:...`/`sha256:...` reference and an exact
-cached schema. `--offline` and `--refresh` are mutually exclusive.
-
-Execute one candidate or a bounded sweep:
-
-```bash
-optimum-advisor bench --config examples/bench.toml
-optimum-advisor bench --config examples/sglang-bench.toml
-optimum-advisor sweep --config examples/sweep.toml
-```
-
-## Configuration
-
-### Schema-v2 TOML
-
-Configuration files are strict TOML. `schema_version = 2` is required; unknown
-and duplicate keys fail. Operational output directories and dry-run mode remain
-CLI options rather than persisted configuration.
+### 2. Write a config
 
 ```toml
+# bench.toml
 schema_version = 2
-engine = "vllm"
+engine = "vllm"                          # or "sglang"
 model = "Qwen/Qwen3-4B-Instruct-2507"
-metric = "tps"
+metric = "tps"                           # what to optimize; see Configuration
 
 [runtime]
 gpus = 1
+
+[correctness]
+enabled = false                          # see "Correctness checks" to enable
+```
+
+### 3. Run it
+
+**On a GPU host** (needs Docker with the NVIDIA container runtime and
+`nvidia-smi`):
+
+```bash
+optimum-advisor bench --config bench.toml
+```
+
+**On Hugging Face Jobs** (no local GPU or Docker; needs the
+[`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli), `hf auth
+login`, and a positive credit balance):
+
+```bash
+optimum-advisor bench --config bench.toml \
+  --on hf-jobs --hf-flavor a10g-large \
+  --results-bucket hf://buckets/<namespace>/<bucket>
+```
+
+Either way you get a run directory containing `report.json` (every metric,
+every trial, including failures) and — once a candidate wins — `best.toml`, a
+runnable config of the winner. Locally it lands under
+`.optimum-advisor/results/`; on HF Jobs it is copied into your bucket.
+
+Try a sweep next: declare arrays under `[sweep]` and run `optimum-advisor
+sweep` to compare candidates — see [Sweeps](#sweeps).
+
+## Preview before you run
+
+These commands validate and print exactly what would execute, without pulling
+images, starting containers, or requiring credentials:
+
+```bash
+optimum-advisor plan  --config bench.toml         # render server/benchmark commands
+optimum-advisor bench --config bench.toml --dry-run
+optimum-advisor sweep --config sweep.toml --dry-run
+optimum-advisor hardware                          # inspect local GPUs
+optimum-advisor params --engine vllm --image vllm/vllm-openai:latest --refresh
+```
+
+`params` resolves the image to an immutable digest and caches the engine's
+accepted CLI arguments; `--offline` reuses only the cache (mutually exclusive
+with `--refresh`). With `--on hf-jobs`, `--dry-run` prints the exact `hf jobs
+run` submission.
+
+## Configuration
+
+Configs are strict schema-v2 TOML: `schema_version = 2` is required, and
+unknown or duplicate keys are rejected. The quickstart config above is
+complete; everything else has defaults. Full reference:
+
+<details>
+<summary>Full annotated example</summary>
+
+```toml
+schema_version = 2
+engine = "vllm"                # vllm | sglang
+model = "Qwen/Qwen3-4B-Instruct-2507"
+metric = "tps"                 # tps | total_tps | input_tps | peak_tps | req_s |
+                               # goodput | ttft | tpot | itl | e2e | p90/p95/p99 variants
+image = "vllm/vllm-openai:latest"  # optional; defaults to the engine's image
+
+[runtime]
+gpus = 1                       # GPU count; or explicit devices:
+# gpu_devices = ["0", "1"]     # indexes/UUIDs; count must equal `gpus`
 max_model_len = 8192
 startup_timeout_secs = 600
 benchmark_timeout_secs = 900
 max_process_output_bytes = 16777216
 
-[benchmark]
+[benchmark]                    # engine-native benchmark shape
 dataset_name = "random"
-num_prompts = 4
+num_prompts = 100
 request_rate = "1"
 max_concurrency = 1
 random_input_len = 1024
 random_output_len = 128
 
-[candidate]
+[candidate]                    # portable dimensions, translated per engine
 tensor_parallelism = 1
 memory_fraction = 0.90
 prefill_token_budget = 8192
 max_running_requests = 8
 
-[correctness]
-enabled = true
-threshold = 0.0
+[correctness]                  # quality gate before the benchmark
+enabled = true                 # default: true
+threshold = 0.0                # default: 0.2; see "Correctness checks"
 timeout_secs = 900
 
-[model_memory]
+[model_memory]                 # optional hf-mem estimate
 enabled = true
-required = false
+required = false               # true makes a missing estimate a failure
 timeout_secs = 300
 
 [leaderboard]
-submit = false
+submit = false                 # opt-in public leaderboard submission
 
-[serve]
+[serve]                        # explicit engine-specific server arguments
 dtype = "auto"
 ```
 
-`[candidate]` contains portable dimensions translated into the selected
-engine's current CLI. `[serve]` contains explicit engine-specific arguments.
-Names are canonicalized, deduplicated, and validated against the schema obtained
-from the immutable image. Repeatable CLI equivalents are `--serve-arg
-NAME=VALUE` and `--serve-flag NAME`.
+</details>
+
+Key rules:
+
+- `[candidate]` holds portable dimensions translated into the selected engine's
+  CLI; `[serve]` holds raw engine arguments. Names are canonicalized,
+  deduplicated, and validated against the schema of the actual image. CLI
+  equivalents: `--serve-arg NAME=VALUE`, `--serve-flag NAME`.
+- Tensor parallelism must be nonzero, cannot exceed the GPU count, and must
+  divide it evenly. Explicit `gpu_devices` must be unique and match `gpus`.
+- Precedence: config file first, explicit CLI overrides win. Environment
+  variables never change benchmark settings; only integration/secret lookups
+  are read (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HF_TOKEN_PATH`, `HF_HOME`,
+  `CUDA_VISIBLE_DEVICES`, `OPTIMUM_ADVISOR_HF_MEM`,
+  `OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`).
 
 ### Sweeps
 
-A sweep adds bounded arrays. Expansion is deterministic, overflow-checked, and
-fails before execution when its Cartesian product exceeds `max_trials`:
+`[sweep]` declares bounded arrays; the Cartesian product expands
+deterministically and fails fast if it exceeds `max_trials`:
 
 ```toml
 [sweep]
-max_trials = 2
+max_trials = 4
 tensor_parallelism = [1, 2]
 
-[sweep.serve]
-# Engine-specific dimensions, when needed:
-# kv-cache-dtype = ["auto", "fp8"]
+[sweep.serve]                  # engine-specific dimensions
+kv-cache-dtype = ["auto", "fp8"]
 ```
 
-See `examples/bench.toml`, `examples/sglang-bench.toml`, and
-`examples/sweep.toml` for runnable configurations.
+Runnable examples live in [`examples/`](examples/).
 
-### Precedence
+## Running benchmarks
 
-The merge order is:
+| Command | What it does |
+| --- | --- |
+| `bench` | Evaluate one candidate |
+| `sweep` | Evaluate a bounded sweep and rank the candidates |
+| `plan` | Print validated commands without executing |
+| `serve` | Run one validated serving container until interrupted |
+| `params` | Inspect/cache an engine image's accepted arguments |
+| `hardware` | Inspect local NVIDIA GPUs |
+| `cleanup` | List/remove only Optimum Advisor-owned containers |
+| `mcp` | Serve MCP JSON-RPC over stdio |
 
-1. schema-v2 TOML;
-2. explicit CLI overrides.
+`optimum-advisor <command> --help` lists every option.
 
-Arbitrary `OPTIMUM_ADVISOR_*` variables do not change model, engine, runtime, or
-candidate settings. Environment access is limited to external integration and
-secret discovery: `CUDA_VISIBLE_DEVICES`, `HF_TOKEN`,
-`HUGGING_FACE_HUB_TOKEN`, Hugging Face token locations, `HF_TOKEN_PATH`,
-`HF_HOME`, `OPTIMUM_ADVISOR_HF_MEM`, and
-`OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`.
+### Where it runs
 
-### GPU selection
+- **Local Docker (default).** Every engine invocation is wrapped in
+  `docker run --gpus ...`; images are resolved to immutable digests, and the
+  run owns and cleans up its containers.
+- **Inside a container (`--in-container`).** The engine binaries run as direct
+  child processes — no Docker daemon needed. Use it in an environment that
+  already provides the engine image (this is how jobs execute on HF Jobs).
+  Explicit `gpu_devices` are applied via `CUDA_VISIBLE_DEVICES`.
+- **Hugging Face Jobs (`--on hf-jobs`).** See below.
 
-`runtime.gpus` selects a count. `runtime.gpu_devices` or repeated
-`--gpu-device` values select explicit GPU indexes/UUIDs. Explicit devices must
-be nonempty and unique, and their count must match `gpus`. Tensor parallelism
-must be nonzero, cannot exceed the selected count, and must divide it evenly.
+Both backends share the same validation, correctness, ranking, and report
+paths; compare them with `plan --config … [--in-container]`.
 
-Under `--in-container`, explicit `gpu_devices` are exported to the server as
-`CUDA_VISIBLE_DEVICES`; count-based `gpus` selection uses whatever GPUs the
-surrounding container exposes.
+### Stopping and cleaning up
 
-## Running evaluations
-
-### Commands
-
-```text
-plan      Render one validated, non-executing server/benchmark preview
-params    Resolve an image and inspect/cache its engine parameter schema
-hardware  Inspect selected local NVIDIA GPUs
-serve     Run one validated owned serving container until exit/interruption
-bench     Evaluate one candidate
-sweep     Evaluate the bounded sweep from a v2 TOML file
-cleanup   List or remove only Optimum Advisor-owned containers
-mcp       Serve newline-delimited MCP JSON-RPC over stdin/stdout
-```
-
-Run `optimum-advisor <command> --help` for the exact options, except `mcp`,
-which intentionally accepts no arguments and reserves stdout for protocol
-frames.
-
-### Execution backends
-
-`plan`, `serve`, `bench`, and `sweep` launch the engine server and benchmark one
-of two ways, selected with `--in-container`:
-
-- **Docker (default):** every engine invocation is wrapped in `docker run --gpus
-  ... <image> ...` on the local host. The image is resolved to an immutable
-  identity, the server port is published, and the run owns and cleans up its
-  containers.
-- **In-container (`--in-container`):** the engine binaries (`vllm` /
-  `python3 -m sglang...`) run directly as child processes bound on loopback,
-  with no Docker daemon, image resolution, or container cleanup. Use it inside a
-  container that already provides the engine image — for example a Hugging Face
-  Job whose image is `vllm/vllm-openai` — where nested Docker is unavailable.
-
-Preview the exact commands for either backend without executing anything:
+All stages are bounded by timeouts. Ctrl-C (SIGINT/SIGTERM) cancels cleanly:
+child process groups get TERM, a grace period, then KILL, and the report is
+finalized as `interrupted`. Docker cleanup only ever touches containers
+carrying the full set of Optimum Advisor ownership labels:
 
 ```bash
-optimum-advisor plan --config examples/bench.toml
-optimum-advisor plan --config examples/bench.toml --in-container
+optimum-advisor cleanup --dry-run     # inspect
+optimum-advisor cleanup               # remove owned containers
 ```
 
-Both backends share the same validation, correctness suite, ranking, schema-v2
-report, and cancellation paths; only server and benchmark launch and image
-handling differ. Under `--in-container` the Hugging Face token, when present, is
-passed through the child environment rather than a `docker run -e` flag, and the
-engine parameter schema is inspected by running `python3` directly instead of
-through Docker.
+## Run on Hugging Face Jobs
 
-### Running on Hugging Face Jobs
-
-`bench` and `sweep` accept `--on hf-jobs` to run on Hugging Face Jobs instead of
-the local host. The evaluation runs inside a single GPU container (the engine
-image) through the in-container backend, so no local Docker or GPU is required —
-only the [`hf` CLI](https://huggingface.co/docs/huggingface_hub/guides/cli), a
-logged-in account (`hf auth login`) with a positive credit balance, and a
-published release of the prebuilt Linux binary.
+`bench` and `sweep` accept `--on hf-jobs` to run the whole evaluation in a
+single GPU job — no local Docker or GPU. The launcher submits an `hf jobs run`
+whose container downloads the Optimum Advisor binary, materializes your config,
+and executes in-container.
 
 ```bash
-optimum-advisor bench --config examples/bench.toml \
-  --on hf-jobs --hf-flavor a10g-large \
-  --results-bucket hf://buckets/<namespace>/<name>
+optimum-advisor bench --config bench.toml \
+  --on hf-jobs --hf-flavor a10g-large --hf-timeout 90m \
+  --results-bucket hf://buckets/<namespace>/<bucket>
 ```
-
-The launcher submits an `hf jobs run` whose container downloads the prebuilt
-binary, materializes the config, and runs the evaluation with `--in-container`.
-The job container image is the config's `image` (defaulting to the engine's own
-image, e.g. `vllm/vllm-openai:latest`); for `bench`, `--image` overrides it —
-useful for custom builds that bundle the engine — and is forwarded to the in-job
-run so the report records the image the job actually ran on. Add `--dry-run` to
-print the exact `hf jobs run` command without submitting.
-
-Options are valid only with `--on hf-jobs`:
 
 | Flag | Meaning |
 | --- | --- |
-| `--hf-flavor` | Hardware flavor (required), e.g. `a10g-large`, `a100-large`. |
-| `--hf-timeout` | Maximum job duration (`90m`, `2h`); the Jobs default is 30 minutes. |
-| `--hf-namespace` | Organization namespace to run the job under. |
-| `--results-bucket` | Persist results to `hf://buckets/<namespace>/<name>[/<path>]`. |
-| `--hf-detach` | Submit in the background and print only the job ID. |
-| `--hf-binary-url` | Override the prebuilt binary URL downloaded inside the job (defaults to the GitHub release matching this binary's version). |
+| `--hf-flavor` | Hardware flavor (required), e.g. `a10g-large`, `a100-large` |
+| `--hf-timeout` | Max job duration (`90m`, `2h`); the Jobs default is 30 minutes |
+| `--hf-namespace` | Organization to run the job under |
+| `--results-bucket` | Copy results to `hf://buckets/<namespace>/<name>[/<path>]` |
+| `--hf-detach` | Submit in the background, print only the job ID |
+| `--hf-binary-url` | Override the in-job binary download URL |
 
-Constraints and behavior:
+Behavior and constraints:
 
-- Requires `--config`; the only supported CLI override is `--image` (see above),
-  so put every other setting in the file.
-- A local Hugging Face token, when present, is forwarded with `hf jobs run
-  --secrets HF_TOKEN` (encrypted server-side) for gated models and bucket access.
-- Results are written to a local directory inside the job and transferred once
-  at the end — also for failed runs, preserving failed-trial evidence. With
-  `--results-bucket` the bucket is mounted read-write and receives a bulk copy
-  of `report.json`, `best.toml`, and per-trial artifacts; without it, results
-  live only in the ephemeral container and the final `report.json` is printed to
-  the job logs.
-- When `[correctness] enabled = true`, the pinned correctness tools are installed
-  into an isolated `uv` environment inside the job, leaving the engine's own
-  dependencies untouched.
+- **Job image.** Defaults to the config's `image` (or the engine's own image).
+  For `bench`, `--image` overrides it — the only CLI override accepted with
+  `--on hf-jobs`; put everything else in the config file. The override is
+  forwarded in-job so the report records the image that actually ran.
+- **Results.** Written locally inside the job and transferred once at the end —
+  also for failed runs, so failure evidence survives. With `--results-bucket`
+  the bucket receives `report.json`, `best.toml`, and per-trial artifacts;
+  without it, the final `report.json` is printed to the job logs.
+- **Auth.** A local Hugging Face token is forwarded as an encrypted job secret
+  for gated models and bucket access.
+- **Correctness.** When enabled, the pinned tools are installed into an
+  isolated environment inside the job; the engine's dependencies are never
+  touched.
+- **Versioning.** The job downloads the release binary **matching your CLI's
+  version** (printed at submit time as `in-job binary: …`), so submitter and
+  job always agree on flags and config schema. After upgrading, make sure your
+  installed CLI matches the newest release before resubmitting.
 
-### Timeouts, cancellation, and cleanup
+## Results
 
-Startup, benchmark, correctness, model-memory, HTTP, and output limits are
-bounded. SIGINT/SIGTERM cancellation propagates through active subprocesses.
-On Unix, child process groups receive TERM, a bounded grace period, and then
-KILL. Docker cleanup targets only containers carrying all Optimum Advisor
-ownership labels, including the run ID and role.
+Every executed run creates a private directory (default under
+`.optimum-advisor/results/`, override with `--results-dir`):
 
-Inspect without removing:
+- `report.json` — the durable source of truth, atomically checkpointed after
+  preflight, every trial, winner selection, and leaderboard submission.
+  Terminal states: `completed`, `completed_with_failures`, `failed`,
+  `interrupted`.
+- `best.toml` — a runnable schema-v2 config of the winner (only written when a
+  candidate succeeds).
+- `trials/NNNN/` — per-trial correctness, benchmark, and bounded diagnostic
+  artifacts.
 
-```bash
-optimum-advisor cleanup --dry-run
-optimum-advisor cleanup --run-id <run-id> --dry-run
-```
+A failed candidate does not abort a sweep: each failure records a typed
+stage/kind and bounded stdout/stderr tails. Ranking considers correctness
+first, then the selected metric, then stable trial order; a candidate with a
+missing or non-finite metric cannot win. Directories are mode `0700`, sensitive
+files `0600`.
 
-Remove matching owned containers:
+## Correctness checks
 
-```bash
-optimum-advisor cleanup
-optimum-advisor cleanup --run-id <run-id>
-```
+When enabled (default), a small lighteval suite (gsm8k, ifeval, triviaqa, drop)
+plus optional tool-call/reasoning probes runs against the served model before
+its benchmark. The `threshold` (in `[0, 1]`) applies **per task**; a missed
+positive threshold fails the trial.
 
-The cleanup command never targets an unlabeled or partially labeled container.
+Calibration matters: `triviaqa` and `drop` are scored by strict exact match and
+score near zero for verbose instruct models, so any positive threshold fails
+healthy configurations of that model class. Use `threshold = 0.0` to validate
+execution and metric collection without a quality floor, and set a positive
+threshold only when every suite task can realistically meet it.
 
-### Reports and artifacts
-
-Every executed `bench` or `sweep` creates a private directory under
-`.optimum-advisor/results` unless `--results-dir` overrides it. The directory is
-created before external preflight and immediately receives `report.json`.
-
-`report.json` is schema version 2 and is atomically checkpointed after
-preflight, after each trial, after winning-config selection, and after
-leaderboard submission. Terminal states are:
-
-- `completed`;
-- `completed_with_failures`;
-- `failed`;
-- `interrupted`.
-
-Expected candidate failures do not abort a sweep. Each failed trial records a
-typed stage/kind, timeout/interruption flags, and bounded UTF-8-safe stdout and
-stderr tails. Ranking considers correctness first, then the selected metric's
-direction, then stable trial order. Missing or non-finite selected metrics
-cannot win. If every candidate fails, the process fails but the terminal report
-and all trial evidence remain available.
-
-Important paths:
-
-- `report.json`: durable source of truth;
-- `best.toml`: runnable winning schema-v2 configuration, written only after a
-  successful winner exists;
-- `trials/NNNN/`: per-trial correctness, benchmark, and bounded diagnostic
-  artifacts recorded in the report manifest.
-
-All result directories are mode `0700` and sensitive files are mode `0600` on
-Unix.
-
-### Correctness
-
-When enabled, correctness runs against the same owned server before its
-benchmark. The suite records task scores and, when configured, probes OpenAI
-chat-completion tool-call and reasoning-parser behavior. The finite threshold
-must be in `[0, 1]`; `0` validates execution and complete metric collection
-without imposing a model-quality floor. A missed positive threshold fails the
-trial and prevents it from winning. The threshold applies per task, and the
-fast suite includes strict exact-match tasks (`triviaqa`, `drop`) that score
-near zero for verbose instruct models through the OpenAI-compatible endpoint —
-set a positive threshold only when every suite task can realistically meet it
-for your model.
-
-Install the pinned external tools in a repository-local environment:
+Running locally requires the pinned tools once:
 
 ```bash
-./scripts/setup-correctness-env.sh
-source .venv/bin/activate
+./scripts/setup-correctness-env.sh && source .venv/bin/activate
 ```
 
-### Secrets and leaderboard submission
+(On HF Jobs this happens automatically inside the job.)
 
-Tokens and submission keys use redacted wrappers, are attached only to child
-environments or HTTPS authorization, and are not included in safe command
-rendering, reports, artifacts, URLs, or persisted configuration. Captured
-process streams are sanitized before storage.
+## Leaderboard and secrets
 
-Leaderboard publishing is opt-in through `[leaderboard] submit = true` or
-`--leaderboard-submit`. The default endpoint is
-`https://hf-dwarez-optimum-advisor-leaderboard.hf.space`; set
-`leaderboard.url` or `--leaderboard-url` to override it. The client requires
-HTTPS, uses rustls plus platform certificate verification, bounds response
-bodies, and applies connect/read/overall deadlines.
+Submission is opt-in (`[leaderboard] submit = true` or `--leaderboard-submit`)
+and posts to `https://hf-dwarez-optimum-advisor-leaderboard.hf.space` (override
+with `leaderboard.url` / `--leaderboard-url`; HTTPS enforced). Contributor
+identity comes from your Hugging Face credential (`hf auth login` or
+`HF_TOKEN`).
 
-Authenticate with `hf auth login` or `HF_TOKEN`. Contributor identity is
-inferred from that credential. An optional administrative submit key is read
-from `OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`. Neither credential is persisted.
+Tokens and submit keys are held in redacted wrappers, passed only to child
+environments or HTTPS authorization, and never appear in rendered commands,
+reports, artifacts, or persisted configuration. Captured process output is
+sanitized before storage.
 
 ## MCP server
 
-Configure an MCP client to start the binary directly:
+Point an MCP client at the binary:
 
 ```json
 {
   "mcpServers": {
-    "optimum-advisor": {
-      "command": "/absolute/path/to/optimum-advisor",
-      "args": ["mcp"]
-    }
+    "optimum-advisor": { "command": "/path/to/optimum-advisor", "args": ["mcp"] }
   }
 }
 ```
 
-The transport is strict newline-delimited JSON-RPC 2.0. Clients initialize,
-receive protocol version `2025-11-25`, send `notifications/initialized`, and
-then call tools. Requests are processed sequentially; `ping` remains available
-during initialization. `notifications/cancelled` cancels a matching queued or
-active tool request. Input lines are capped at 1 MiB, responses at 256 KiB, and
-human-readable tool text at 64 KiB. Stdout contains protocol frames only.
+Transport is strict newline-delimited JSON-RPC 2.0 (protocol `2025-11-25`);
+stdout carries protocol frames only. Tools: `inspect_hardware`,
+`inspect_engine`, `validate_config`, `estimate_memory`, `check_correctness`,
+`run_benchmark`, `evaluate_candidate`, `run_sweep`, `rank_candidates`. Schemas
+are generated from the same strict types the CLI uses; execution tools share
+the CLI's validation, cancellation, persistence, and cleanup paths and return
+bounded summaries plus durable report paths. Requests run sequentially;
+`notifications/cancelled` cancels a queued or active request; input lines are
+capped at 1 MiB and responses at 256 KiB.
 
-Tools:
+## Limitations
 
-- `inspect_hardware`;
-- `inspect_engine`;
-- `validate_config`;
-- `estimate_memory`;
-- `check_correctness`;
-- `run_benchmark`;
-- `evaluate_candidate`;
-- `run_sweep`;
-- `rank_candidates`.
+- Execution is sequential — one candidate at a time, not distributed.
+- The default backend needs Docker + NVIDIA GPUs; `--in-container` drops Docker
+  but still needs the engine CLI and visible GPUs; `--on hf-jobs` needs a
+  Hugging Face account with credits.
+- Model-memory estimation depends on the optional external `hf-mem` command.
+- Correctness depends on separately installed pinned Python tools.
+- No heuristics generate candidates from hardware or memory budgets, and no
+  latency/throughput constraint solver exists — you declare the candidates.
 
-Input and output JSON Schemas are generated from the same strict Rust DTOs used
-for decoding. Unknown fields fail. Execution tools use the same cancellation,
-immutable image, validation, persistence, and cleanup path as the CLI. They
-return bounded summaries plus durable report paths. Tool-domain failures remain
-successful JSON-RPC responses with `isError: true` and a typed payload;
-malformed envelopes and unknown methods use JSON-RPC errors.
+## Contributing
 
-## Development
-
-### Development gates
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets --all-features --locked
-cargo build --release --all-features --locked
-cargo +1.85.0 test --all-targets --all-features --locked
-sh -n scripts/install.sh scripts/setup-correctness-env.sh
-```
-
-CI also runs RustSec `cargo audit` and ShellCheck.
-
-### Real GPU-host acceptance
-
-The ignored acceptance test performs real hardware selection, immutable image
-and parameter inspection, one tiny correctness-plus-benchmark candidate, a
-two-candidate sweep, SIGINT cleanup, report-v2 checks, winning-config checks,
-and owned-container leak comparison. It does not fake GPU success.
-
-Prepare the correctness environment, choose a model appropriate for the host,
-and opt in explicitly:
-
-```bash
-./scripts/setup-correctness-env.sh
-source .venv/bin/activate
-
-OPTIMUM_ADVISOR_GPU_ACCEPTANCE=1 \
-OPTIMUM_ADVISOR_GPU_ACCEPTANCE_MODEL=Qwen/Qwen3-0.6B \
-cargo test --test gpu_acceptance -- --ignored --nocapture
-```
-
-Optional overrides:
-
-```bash
-OPTIMUM_ADVISOR_GPU_ACCEPTANCE_ENGINE=sglang
-OPTIMUM_ADVISOR_GPU_ACCEPTANCE_IMAGE=repo/image@sha256:<digest>
-```
-
-Run this only on a disposable or controlled GPU host: it pulls/starts real
-containers and performs real inference.
-
-### Releases
-
-Releases are fully automated with [release-plz](https://release-plz.dev) in
-git-only mode (the crate is not published to crates.io):
-
-1. Every push to `main` opens or updates a release PR that bumps the version
-   and `CHANGELOG.md` from the commits since the last tag.
-2. Merging that PR makes CI create the `v<version>` git tag and the GitHub
-   release, then dispatches the workflow that builds and attaches the prebuilt
-   binaries for every supported target.
-
-A release PR is opened only when a **functional** commit landed since the last
-tag: one typed `feat:`, `fix:`, `add:`, `remove:`, `refactor:`, or `perf:`.
-Docs, CI, and tooling commits (`change:`, `doc:`, `chore:`, `ci:`, `test:`) do
-not cut releases by themselves — they ride along in the next release triggered
-by a functional commit. For the bump, `feat:` raises minor (also on `0.x`),
-the other triggering types raise patch, and `!`/`BREAKING CHANGE` marks a
-breaking release. Manually pushed `v*` tags still trigger the binary build
-directly, and `gh workflow run release.yml -f tag=v<version>` (re)attaches
-binaries to an existing release.
-
-To force a release when no functional commit is pending (release-plz only sees
-commits that touch files, so an empty commit does not count), dispatch the
-workflow with the gate disabled:
-
-```bash
-gh workflow run release-plz.yml -f force=true
-```
-
-then merge the release PR it opens.
-
-One-time repository setting: enable "Allow GitHub Actions to create and
-approve pull requests" (Settings → Actions → General) so the release PR can be
-opened with the default `GITHUB_TOKEN`. Release PRs opened with that token do
-not trigger PR CI; the gates run when the merge lands on `main`.
-
-## Explicit limitations
-
-- execution is sequential, one candidate at a time, not distributed;
-- the default Docker backend requires Docker and NVIDIA GPU support for real
-  serving runs; the `--in-container` backend drops the Docker dependency but
-  still needs the engine CLI and visible GPUs inside the container;
-- model-memory estimation depends on an optional external `hf-mem` command;
-- correctness depends on the separately installed pinned Python tools;
-- no advisor heuristics currently generate candidates from hardware or memory
-  budgets;
-- no latency-ceiling or minimum-throughput constraint solver exists;
-- GPU-host acceptance is opt-in and is not simulated in ordinary CI.
+Development gates, the GPU acceptance test, and the release process are
+documented in [CONTRIBUTING.md](CONTRIBUTING.md).
