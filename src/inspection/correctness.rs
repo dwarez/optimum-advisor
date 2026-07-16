@@ -99,6 +99,12 @@ pub(crate) fn lighteval_spec(
     let mut spec = ProcessSpec::new("lighteval", args)
         .with_stage(ExecutionStage::Correctness)
         .with_timeout(timeout)
+        // lighteval imports GitPython, which aborts at import time when no
+        // `git` executable exists (e.g. inside engine images on Hugging Face
+        // Jobs). `quiet` downgrades that to a no-op; lighteval's only git use
+        // is guarded and degrades to an unknown sha. Hosts with git installed
+        // are unaffected.
+        .with_env("GIT_PYTHON_REFRESH", "quiet")
         .with_artifacts(
             output_dir.join("lighteval.stdout.log"),
             output_dir.join("lighteval.stderr.log"),
@@ -614,6 +620,10 @@ mod tests {
         }));
         assert!(args.contains(&suite().task_spec()));
         assert!(lighteval.deadline.is_some());
+        assert!(lighteval
+            .env_add
+            .iter()
+            .any(|(name, value)| name == "GIT_PYTHON_REFRESH" && value == "quiet"));
 
         assert!(capability_probe_spec(&config, directory.path()).is_none());
         config.serve_args = vec![DynamicArg::value("reasoning-parser", "qwen3")];
