@@ -28,6 +28,10 @@ use crate::{
 const BINARY_PATH: &str = "/tmp/optimum-advisor";
 const CONFIG_PATH: &str = "/tmp/optimum-advisor-config.toml";
 const CORRECTNESS_VENV: &str = "/tmp/optimum-advisor-correctness";
+/// One-entry directory prepended to PATH so `lighteval` resolves from the
+/// isolated venv while `python3` keeps resolving to the base image's
+/// interpreter (which the engine introspection imports vllm/sglang from).
+const SHIM_DIR: &str = "/tmp/optimum-advisor-bin";
 const RESULTS_MOUNT: &str = "/results";
 /// Local staging directory inside the job. Checkpoints need atomic same-dir
 /// rename and directory fsync, which bucket FUSE mounts do not reliably
@@ -163,9 +167,12 @@ fn build_bootstrap(
         "printf %s '{config_b64}' | base64 -d > {CONFIG_PATH}\n"
     ));
     if correctness {
-        // Install the correctness tools in an isolated venv so vLLM/SGLang's own
-        // environment is never mutated; prepend it so `lighteval` resolves first
-        // while the engine binaries still resolve from the base image.
+        // Install the correctness tools in an isolated venv so vLLM/SGLang's
+        // own environment is never mutated. Expose ONLY the `lighteval`
+        // entrypoint through a one-entry shim directory: prepending the whole
+        // venv bin would shadow `python3`, and the engine parameter
+        // introspection and capability probes must keep resolving the base
+        // image's python (the venv interpreter cannot import vllm/sglang).
         script.push_str(&format!("uv venv {CORRECTNESS_VENV}\n"));
         script.push_str(&format!(
             "VIRTUAL_ENV={CORRECTNESS_VENV} uv pip install --quiet {}\n",
@@ -175,7 +182,11 @@ fn build_bootstrap(
                 .collect::<Vec<_>>()
                 .join(" ")
         ));
-        script.push_str(&format!("export PATH=\"{CORRECTNESS_VENV}/bin:$PATH\"\n"));
+        script.push_str(&format!("mkdir -p {SHIM_DIR}\n"));
+        script.push_str(&format!(
+            "ln -sf {CORRECTNESS_VENV}/bin/lighteval {SHIM_DIR}/lighteval\n"
+        ));
+        script.push_str(&format!("export PATH=\"{SHIM_DIR}:$PATH\"\n"));
     }
     script.push_str(&format!("mkdir -p {LOCAL_RESULTS}\n"));
     let image_argument = forwarded_image
@@ -332,6 +343,12 @@ mod tests {
         assert!(bucket.contains("urllib.request.urlretrieve"));
         assert!(bucket.contains("uv venv /tmp/optimum-advisor-correctness"));
         assert!(bucket.contains("lighteval==0.13.0"));
+        // Only `lighteval` is exposed; `python3` must keep resolving to the
+        // base image (the venv interpreter cannot import the engine).
+        assert!(bucket
+            .contains("ln -sf /tmp/optimum-advisor-correctness/bin/lighteval /tmp/optimum-advisor-bin/lighteval"));
+        assert!(bucket.contains("export PATH=\"/tmp/optimum-advisor-bin:$PATH\""));
+        assert!(!bucket.contains("PATH=\"/tmp/optimum-advisor-correctness/bin"));
         // The run itself never writes to the FUSE mount.
         assert!(bucket.contains("--results-dir /tmp/optimum-advisor-results"));
         assert!(!bucket.contains("--results-dir /results"));
