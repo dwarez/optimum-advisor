@@ -47,7 +47,7 @@ configurations or enforce service-level objectives.
   container; see [Execution backends](#execution-backends).
 - NVIDIA drivers and `nvidia-smi` on execution hosts.
 - Rust **1.85.0** or newer to build from source (not needed for the prebuilt
-  binary).
+  binaries).
 - The correctness environment when correctness is enabled:
   `./scripts/setup-correctness-env.sh`.
 - Optional: `hf-mem`, `uvx hf-mem`, or a configured command for model-memory
@@ -61,22 +61,33 @@ configurations or enforce service-level objectives.
 
 ### Installation
 
-#### Prebuilt binary (Linux x86_64)
+#### Prebuilt binaries
 
-Every [release](https://github.com/dwarez/optimum-advisor/releases) attaches a
-statically linked binary that runs on any x86_64 Linux distribution — no Rust
-toolchain, no glibc requirement. Download it, verify the checksum, and install:
+Every [release](https://github.com/dwarez/optimum-advisor/releases) attaches
+per-target binaries with `.sha256` checksums:
+
+| Platform | Asset |
+| --- | --- |
+| Linux x86_64 (static musl; also downloaded inside Hugging Face Jobs) | `optimum-advisor-x86_64-unknown-linux-musl` |
+| macOS Apple Silicon | `optimum-advisor-aarch64-apple-darwin` |
+| macOS Intel | `optimum-advisor-x86_64-apple-darwin` |
+
+Download the asset for your platform, verify the checksum, and install:
 
 ```bash
-curl -fsSLO https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-x86_64-unknown-linux-musl
-curl -fsSLO https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-x86_64-unknown-linux-musl.sha256
-sha256sum -c optimum-advisor-x86_64-unknown-linux-musl.sha256
-install -m 0755 optimum-advisor-x86_64-unknown-linux-musl ~/.local/bin/optimum-advisor
+target=$(case "$(uname -s)-$(uname -m)" in
+  (Linux-x86_64)  echo x86_64-unknown-linux-musl ;;
+  (Darwin-arm64)  echo aarch64-apple-darwin ;;
+  (Darwin-x86_64) echo x86_64-apple-darwin ;;
+esac)
+curl -fsSLO "https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-$target"
+curl -fsSLO "https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-$target.sha256"
+shasum -a 256 -c "optimum-advisor-$target.sha256"   # on Linux: sha256sum -c
+install -m 0755 "optimum-advisor-$target" ~/.local/bin/optimum-advisor
 ```
 
 Pin a specific version by replacing `latest/download` with
-`download/v<version>`. This is the same artifact the `--on hf-jobs` launcher
-downloads inside jobs.
+`download/v<version>`. For other platforms, build from source.
 
 #### From source (any platform)
 
@@ -520,13 +531,17 @@ git-only mode (the crate is not published to crates.io):
    and `CHANGELOG.md` from the commits since the last tag.
 2. Merging that PR makes CI create the `v<version>` git tag and the GitHub
    release, then dispatches the workflow that builds and attaches the prebuilt
-   static Linux binary — the artifact the `--on hf-jobs` launcher downloads.
+   binaries for every supported target.
 
-Conventional commits drive the bump: `feat:` bumps minor (also on `0.x`),
-`fix:` and other messages bump patch, and `!`/`BREAKING CHANGE` marks a
-breaking release. This repository's `add:`/`change:`/`refactor:` prefixes are
-grouped in the changelog and produce patch bumps. Manually pushed `v*` tags
-still trigger the binary build directly.
+A release PR is opened only when a **functional** commit landed since the last
+tag: one typed `feat:`, `fix:`, `add:`, `remove:`, `refactor:`, or `perf:`.
+Docs, CI, and tooling commits (`change:`, `doc:`, `chore:`, `ci:`, `test:`) do
+not cut releases by themselves — they ride along in the next release triggered
+by a functional commit. For the bump, `feat:` raises minor (also on `0.x`),
+the other triggering types raise patch, and `!`/`BREAKING CHANGE` marks a
+breaking release. Manually pushed `v*` tags still trigger the binary build
+directly, and `gh workflow run release.yml -f tag=v<version>` (re)attaches
+binaries to an existing release.
 
 One-time repository setting: enable "Allow GitHub Actions to create and
 approve pull requests" (Settings → Actions → General) so the release PR can be

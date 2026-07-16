@@ -17,6 +17,13 @@ git_only = true
 publish = false
 # Keep `feat:` commits bumping the minor version also while on 0.x.
 features_always_increment_minor = true
+# Open/refresh a release PR only when a functional commit landed since the
+# last tag. Docs, CI, and tooling commits (`change:`, `doc:`, `chore:`,
+# `ci:`, `test:`) do not cut releases by themselves; they ride along in the
+# next release triggered by a matching commit. File-based gating is not an
+# option: release-plz's git-only change detection bumps on any commit,
+# regardless of cargo package contents.
+release_commits = "^(feat|fix|add|remove|refactor|perf)[(!:]"
 # The tag format is load-bearing: the hf-jobs launcher downloads
 # `releases/download/v{CARGO_PKG_VERSION}/...` inside the job.
 git_tag_name = "v{{ version }}"
