@@ -135,6 +135,9 @@ pub(crate) fn submit(
         progress,
         &format!("submitting {subcommand} to Hugging Face Jobs (flavor {flavor})"),
     )?;
+    // Surface the pinned binary so a stale local checkout (whose version pins
+    // an older release) is visible at submit time instead of failing in-job.
+    writeln_checked(progress, &format!("in-job binary: {}", settings.binary_url))?;
     run_hf(&args)?;
     if let Some(bucket) = &settings.results_bucket {
         writeln_checked(out, &format!("results: {bucket}"))?;
