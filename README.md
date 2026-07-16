@@ -1,14 +1,18 @@
 # Optimum Advisor
 
-Find the best vLLM or SGLang serving configuration for your model — on your own
-NVIDIA GPU host via Docker, or on [Hugging Face Jobs](#run-on-hugging-face-jobs)
-with no GPU of your own. Optimum Advisor serves each candidate configuration,
-optionally checks output quality, runs the engine's native benchmark against it,
-ranks the results, and writes a durable report plus a ready-to-run winning
-config.
+How you serve a model — engine, parallelism, memory budget, batching, cache
+settings — can move throughput and latency by large factors, and the only way
+to know what works on *your* model and *your* hardware is to measure it.
+Optimum Advisor makes that measurement systematic: declare candidate serving
+configurations, and it serves each one, checks output quality, runs the
+engine's own benchmark, ranks the candidates, and leaves you a durable report
+plus a ready-to-run winning configuration.
 
-It is not a cluster scheduler or an automatic tuner: candidates run one at a
-time, and ranking covers only the candidates you declare.
+Today it drives **vLLM** and **SGLang**, running either on your own NVIDIA GPU
+host via Docker or on [Hugging Face Jobs](#run-on-hugging-face-jobs) with no
+GPU of your own. It is not a cluster scheduler or an automatic tuner:
+candidates run one at a time, and ranking covers only the candidates you
+declare.
 
 **Jump to:**
 [Quickstart](#quickstart) ·
