@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/dwarez/optimum-advisor/compare/v0.1.0...v0.1.1) - 2026-07-16
+
+### Added
+
+- release support for macos ([#23](https://github.com/dwarez/optimum-advisor/pull/23))
+
+### Changed
+
+- better readme ([#21](https://github.com/dwarez/optimum-advisor/pull/21))
+
 ## [0.1.0](https://github.com/dwarez/optimum-advisor/releases/tag/v0.1.0) - 2026-07-15
 
 ### Added
