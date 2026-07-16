@@ -7,11 +7,14 @@
 
 [workspace]
 # Git-only mode: this crate is not on crates.io, so versions are determined
-# from git tags and `cargo publish` never runs; release-plz manages the
-# version bump, changelog, git tag, and GitHub release. Note: Cargo.toml must
-# NOT set `publish = false` — the `release` command silently skips
-# unpublishable packages, even in git-only mode.
+# from git tags; release-plz manages the version bump, changelog, git tag, and
+# GitHub release. BOTH keys below are required: `git_only` alone does NOT
+# disable `cargo publish` (release-plz requires `publish` to be explicitly
+# false when `git_only` is set). Note: Cargo.toml must NOT set
+# `publish = false` — the `release` command silently skips unpublishable
+# packages, even in git-only mode.
 git_only = true
+publish = false
 # Keep `feat:` commits bumping the minor version also while on 0.x.
 features_always_increment_minor = true
 # The tag format is load-bearing: the hf-jobs launcher downloads
