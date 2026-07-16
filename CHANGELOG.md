@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/dwarez/optimum-advisor/compare/v0.1.3...v0.1.4) - 2026-07-16
+
+### Fixed
+
+- change example correctness thresholds
+
 ## [0.1.3](https://github.com/dwarez/optimum-advisor/compare/v0.1.2...v0.1.3) - 2026-07-16
 
 ### Fixed
