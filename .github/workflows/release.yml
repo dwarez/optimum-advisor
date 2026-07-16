@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing git tag to build and attach the binary to"
+        description: "Existing git tag to build and attach the binaries to"
         required: true
         type: string
 
@@ -19,39 +19,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  linux-musl:
-    name: Publish static Linux x86_64 binary
+  ensure-release:
+    name: Ensure the GitHub release exists
     runs-on: ubuntu-latest
     steps:
-      - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref_name }}
-      - name: Install stable Rust with musl target
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup target add x86_64-unknown-linux-musl
-      - name: Install musl build tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends musl-tools
-      - name: Build static release binary
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
-      - name: Stage artifact and checksum
-        run: |
-          set -eu
-          asset="optimum-advisor-x86_64-unknown-linux-musl"
-          bin="target/x86_64-unknown-linux-musl/release/optimum-advisor"
-          test -x "$bin"
-          strip "$bin"
-          mkdir -p dist
-          install -m 0755 "$bin" "dist/${asset}"
-          ( cd dist && sha256sum "$asset" > "${asset}.sha256" )
-          ls -l dist
-      - name: Publish binary to the GitHub Release
+      - name: Create the release if missing
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -60,4 +32,61 @@ jobs:
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
           fi
+
+  binaries:
+    name: Publish ${{ matrix.target }} binary
+    needs: ensure-release
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static Linux binary; also downloaded inside Hugging Face Jobs.
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+      - name: Install stable Rust with the release target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: Install musl build tools
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Build release binary
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage artifact and checksum
+        run: |
+          set -eu
+          asset="optimum-advisor-${{ matrix.target }}"
+          bin="target/${{ matrix.target }}/release/optimum-advisor"
+          test -x "$bin"
+          strip "$bin"
+          mkdir -p dist
+          install -m 0755 "$bin" "dist/${asset}"
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "${asset}.sha256"
+          else
+            shasum -a 256 "$asset" > "${asset}.sha256"
+          fi
+          ls -l
+      - name: Upload binary to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
           gh release upload "$tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
