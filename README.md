@@ -543,6 +543,16 @@ breaking release. Manually pushed `v*` tags still trigger the binary build
 directly, and `gh workflow run release.yml -f tag=v<version>` (re)attaches
 binaries to an existing release.
 
+To force a release when no functional commit is pending (release-plz only sees
+commits that touch files, so an empty commit does not count), dispatch the
+workflow with the gate disabled:
+
+```bash
+gh workflow run release-plz.yml -f force=true
+```
+
+then merge the release PR it opens.
+
 One-time repository setting: enable "Allow GitHub Actions to create and
 approve pull requests" (Settings → Actions → General) so the release PR can be
 opened with the default `GITHUB_TOKEN`. Release PRs opened with that token do

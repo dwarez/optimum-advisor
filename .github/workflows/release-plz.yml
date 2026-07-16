@@ -4,6 +4,14 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      force:
+        description: >-
+          Open the release PR even when no commit matches release_commits
+          (e.g. to cut a release containing only docs or tooling changes).
+        type: boolean
+        default: false
 
 permissions: {}
 
@@ -66,9 +74,18 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+      - name: Drop the release gate for forced runs
+        # `release_commits` only sees commits that touch files, so an empty
+        # commit cannot force a release. Instead, a manual dispatch with
+        # `force=true` runs release-pr against an out-of-tree copy of the
+        # config without the gate; the checkout stays clean, so the release
+        # PR never contains the modified config.
+        if: github.event_name == 'workflow_dispatch' && inputs.force
+        run: sed '/^release_commits/d' release-plz.toml > "$RUNNER_TEMP/release-plz-forced.toml"
       - name: Run release-plz release-pr
         uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release-pr
+          config: ${{ (github.event_name == 'workflow_dispatch' && inputs.force) && format('{0}/release-plz-forced.toml', runner.temp) || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
