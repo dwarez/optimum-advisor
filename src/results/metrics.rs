@@ -1,7 +1,4 @@
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashSet},
-};
+use std::{cmp::Ordering, collections::BTreeMap};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -71,7 +68,7 @@ pub(crate) struct BenchmarkMetrics {
 impl BenchmarkMetrics {
     pub(crate) fn parse(text: &str, selected: Metric) -> Result<Self> {
         let mut metrics = Self::default();
-        let mut recognized = HashSet::new();
+        let mut recognized: BTreeMap<String, Option<f64>> = BTreeMap::new();
         for line in text.lines() {
             let Some((raw_label, raw_value)) = line.split_once(':') else {
                 continue;
@@ -79,10 +76,16 @@ impl BenchmarkMetrics {
             let label = raw_label.trim();
             let parsed = first_finite_number(raw_value);
             if metrics.set(label, parsed) {
-                if !recognized.insert(label.to_string()) {
-                    return Err(metric_error(format!(
-                        "benchmark output contains duplicate metric {label:?}"
-                    )));
+                // Engine benchmarks may echo a configured value both before the
+                // run and inside the result block (e.g. vLLM prints "Maximum
+                // request concurrency" twice). A repeat carrying the same value
+                // is self-consistent; only conflicting repeats are ambiguous.
+                if let Some(previous) = recognized.insert(label.to_string(), parsed) {
+                    if previous != parsed {
+                        return Err(metric_error(format!(
+                            "benchmark output contains conflicting values for metric {label:?}"
+                        )));
+                    }
                 }
             } else if metrics.unrecognized.len() < MAX_UNRECOGNIZED_METRICS {
                 metrics.unrecognized.insert(
@@ -315,6 +318,37 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("failed requests"));
+    }
+
+    #[test]
+    fn tolerates_self_consistent_duplicate_metrics() {
+        // vLLM `bench serve` echoes the configured concurrency before the run
+        // and again inside the result block; both carry the same value.
+        let metrics = BenchmarkMetrics::parse(
+            "Maximum request concurrency: 1\n\
+             ============ Serving Benchmark Result ============\n\
+             Successful requests: 4\n\
+             Maximum request concurrency: 1\n\
+             Output token throughput (tok/s): 10\n",
+            Metric::Tps,
+        )
+        .unwrap();
+
+        assert_eq!(metrics.max_request_concurrency, Some(1.0));
+        assert_eq!(metrics.output_token_throughput, Some(10.0));
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_metrics() {
+        let error = BenchmarkMetrics::parse(
+            "Maximum request concurrency: 1\n\
+             Maximum request concurrency: 2\n\
+             Output token throughput (tok/s): 10\n",
+            Metric::Tps,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("conflicting values"));
     }
 
     #[test]

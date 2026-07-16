@@ -184,7 +184,7 @@ max_running_requests = 8
 
 [correctness]
 enabled = true
-threshold = 0.80
+threshold = 0.0
 timeout_secs = 900
 
 [model_memory]
@@ -410,7 +410,11 @@ benchmark. The suite records task scores and, when configured, probes OpenAI
 chat-completion tool-call and reasoning-parser behavior. The finite threshold
 must be in `[0, 1]`; `0` validates execution and complete metric collection
 without imposing a model-quality floor. A missed positive threshold fails the
-trial and prevents it from winning.
+trial and prevents it from winning. The threshold applies per task, and the
+fast suite includes strict exact-match tasks (`triviaqa`, `drop`) that score
+near zero for verbose instruct models through the OpenAI-compatible endpoint —
+set a positive threshold only when every suite task can realistically meet it
+for your model.
 
 Install the pinned external tools in a repository-local environment:
 
