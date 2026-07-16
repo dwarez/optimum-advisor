@@ -6,7 +6,9 @@ rust-version = "1.85"
 description = "Experimental CLI for benchmarking and advising LLM serving configurations."
 repository = "https://github.com/dwarez/optimum-advisor"
 readme = "README.md"
-publish = false
+# Do not add `publish = false`: release-plz's `release` command silently skips
+# unpublishable packages, which breaks the automated GitHub release. Git-only
+# mode in release-plz.toml already prevents any `cargo publish`.
 
 [dependencies]
 clap = { version = "4.6.1", features = ["derive"] }
