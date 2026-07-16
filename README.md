@@ -1,23 +1,53 @@
 # Optimum Advisor
 
-Optimum Advisor is a production-hardened local runner for comparing vLLM and
-SGLang serving configurations on NVIDIA GPU hosts. It resolves container images
-to immutable identities, validates engine arguments against the selected image,
-runs correctness and engine-native benchmarks, preserves failed trials, and
-writes an atomic schema-v2 report.
+Optimum Advisor is a production-hardened runner for comparing vLLM and
+SGLang serving configurations on NVIDIA GPU hosts — locally via Docker, or
+remotely on Hugging Face Jobs. It resolves container images to immutable
+identities, validates engine arguments against the selected image, runs
+correctness and engine-native benchmarks, preserves failed trials, and writes
+an atomic schema-v2 report.
 
 It is **not** a production advisor or cluster scheduler. Candidate execution is
-sequential and local. Selection ranks only observed candidates; it does not yet
-invent configurations or enforce service-level objectives.
+sequential. Selection ranks only observed candidates; it does not yet invent
+configurations or enforce service-level objectives.
 
-## Requirements
+**Contents**
 
-- Rust **1.85.0** or newer to build from source.
+- [Getting started](#getting-started)
+  — [Requirements](#requirements)
+  · [Installation](#installation)
+  · [Safe first run](#safe-first-run)
+- [Configuration](#configuration)
+  — [Schema-v2 TOML](#schema-v2-toml)
+  · [Sweeps](#sweeps)
+  · [Precedence](#precedence)
+  · [GPU selection](#gpu-selection)
+- [Running evaluations](#running-evaluations)
+  — [Commands](#commands)
+  · [Execution backends](#execution-backends)
+  · [Running on Hugging Face Jobs](#running-on-hugging-face-jobs)
+  · [Timeouts, cancellation, and cleanup](#timeouts-cancellation-and-cleanup)
+  · [Reports and artifacts](#reports-and-artifacts)
+  · [Correctness](#correctness)
+  · [Secrets and leaderboard submission](#secrets-and-leaderboard-submission)
+- [MCP server](#mcp-server)
+- [Development](#development)
+  — [Development gates](#development-gates)
+  · [Real GPU-host acceptance](#real-gpu-host-acceptance)
+  · [Releases](#releases)
+- [Explicit limitations](#explicit-limitations)
+
+## Getting started
+
+### Requirements
+
 - Docker with the NVIDIA container runtime (`docker run --gpus ...`) for the
   default execution backend. The `--in-container` backend instead expects the
   engine CLI (`vllm`, or `python3 -m sglang...`) on `PATH` inside the current
   container; see [Execution backends](#execution-backends).
 - NVIDIA drivers and `nvidia-smi` on execution hosts.
+- Rust **1.85.0** or newer to build from source (not needed for the prebuilt
+  binary).
 - The correctness environment when correctness is enabled:
   `./scripts/setup-correctness-env.sh`.
 - Optional: `hf-mem`, `uvx hf-mem`, or a configured command for model-memory
@@ -29,7 +59,26 @@ invent configurations or enforce service-level objectives.
   and a logged-in account to submit runs with `--on hf-jobs`; see
   [Running on Hugging Face Jobs](#running-on-hugging-face-jobs).
 
-## Install
+### Installation
+
+#### Prebuilt binary (Linux x86_64)
+
+Every [release](https://github.com/dwarez/optimum-advisor/releases) attaches a
+statically linked binary that runs on any x86_64 Linux distribution — no Rust
+toolchain, no glibc requirement. Download it, verify the checksum, and install:
+
+```bash
+curl -fsSLO https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-x86_64-unknown-linux-musl
+curl -fsSLO https://github.com/dwarez/optimum-advisor/releases/latest/download/optimum-advisor-x86_64-unknown-linux-musl.sha256
+sha256sum -c optimum-advisor-x86_64-unknown-linux-musl.sha256
+install -m 0755 optimum-advisor-x86_64-unknown-linux-musl ~/.local/bin/optimum-advisor
+```
+
+Pin a specific version by replacing `latest/download` with
+`download/v<version>`. This is the same artifact the `--on hf-jobs` launcher
+downloads inside jobs.
+
+#### From source (any platform)
 
 From this checkout:
 
@@ -51,7 +100,7 @@ cargo install --git https://github.com/dwarez/optimum-advisor.git --locked --for
 
 Uninstall with `cargo uninstall optimum-advisor`.
 
-## Safe first run
+### Safe first run
 
 Dry-run planning performs local invariant checks and renders the exact commands.
 It does not pull images, inspect hardware, start Docker containers, contact the
@@ -87,7 +136,9 @@ optimum-advisor bench --config examples/sglang-bench.toml
 optimum-advisor sweep --config examples/sweep.toml
 ```
 
-## Schema-v2 TOML
+## Configuration
+
+### Schema-v2 TOML
 
 Configuration files are strict TOML. `schema_version = 2` is required; unknown
 and duplicate keys fail. Operational output directories and dry-run mode remain
@@ -143,6 +194,8 @@ Names are canonicalized, deduplicated, and validated against the schema obtained
 from the immutable image. Repeatable CLI equivalents are `--serve-arg
 NAME=VALUE` and `--serve-flag NAME`.
 
+### Sweeps
+
 A sweep adds bounded arrays. Expansion is deterministic, overflow-checked, and
 fails before execution when its Cartesian product exceeds `max_trials`:
 
@@ -173,7 +226,20 @@ secret discovery: `CUDA_VISIBLE_DEVICES`, `HF_TOKEN`,
 `HF_HOME`, `OPTIMUM_ADVISOR_HF_MEM`, and
 `OPTIMUM_ADVISOR_LEADERBOARD_SUBMIT_KEY`.
 
-## Commands
+### GPU selection
+
+`runtime.gpus` selects a count. `runtime.gpu_devices` or repeated
+`--gpu-device` values select explicit GPU indexes/UUIDs. Explicit devices must
+be nonempty and unique, and their count must match `gpus`. Tensor parallelism
+must be nonzero, cannot exceed the selected count, and must divide it evenly.
+
+Under `--in-container`, explicit `gpu_devices` are exported to the server as
+`CUDA_VISIBLE_DEVICES`; count-based `gpus` selection uses whatever GPUs the
+surrounding container exposes.
+
+## Running evaluations
+
+### Commands
 
 ```text
 plan      Render one validated, non-executing server/benchmark preview
@@ -269,17 +335,6 @@ Constraints and behavior:
   into an isolated `uv` environment inside the job, leaving the engine's own
   dependencies untouched.
 
-### GPU selection
-
-`runtime.gpus` selects a count. `runtime.gpu_devices` or repeated
-`--gpu-device` values select explicit GPU indexes/UUIDs. Explicit devices must
-be nonempty and unique, and their count must match `gpus`. Tensor parallelism
-must be nonzero, cannot exceed the selected count, and must divide it evenly.
-
-Under `--in-container`, explicit `gpu_devices` are exported to the server as
-`CUDA_VISIBLE_DEVICES`; count-based `gpus` selection uses whatever GPUs the
-surrounding container exposes.
-
 ### Timeouts, cancellation, and cleanup
 
 Startup, benchmark, correctness, model-memory, HTTP, and output limits are
@@ -298,12 +353,13 @@ optimum-advisor cleanup --run-id <run-id> --dry-run
 Remove matching owned containers:
 
 ```bash
+optimum-advisor cleanup
 optimum-advisor cleanup --run-id <run-id>
 ```
 
 The cleanup command never targets an unlabeled or partially labeled container.
 
-## Reports and artifacts
+### Reports and artifacts
 
 Every executed `bench` or `sweep` creates a private directory under
 `.optimum-advisor/results` unless `--results-dir` overrides it. The directory is
@@ -336,7 +392,7 @@ Important paths:
 All result directories are mode `0700` and sensitive files are mode `0600` on
 Unix.
 
-## Correctness
+### Correctness
 
 When enabled, correctness runs against the same owned server before its
 benchmark. The suite records task scores and, when configured, probes OpenAI
@@ -352,7 +408,7 @@ Install the pinned external tools in a repository-local environment:
 source .venv/bin/activate
 ```
 
-## Secrets and leaderboard submission
+### Secrets and leaderboard submission
 
 Tokens and submission keys use redacted wrappers, are attached only to child
 environments or HTTPS authorization, and are not included in safe command
@@ -411,7 +467,22 @@ return bounded summaries plus durable report paths. Tool-domain failures remain
 successful JSON-RPC responses with `isError: true` and a typed payload;
 malformed envelopes and unknown methods use JSON-RPC errors.
 
-## Real GPU-host acceptance
+## Development
+
+### Development gates
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --all-features --locked
+cargo build --release --all-features --locked
+cargo +1.85.0 test --all-targets --all-features --locked
+sh -n scripts/install.sh scripts/setup-correctness-env.sh
+```
+
+CI also runs RustSec `cargo audit` and ShellCheck.
+
+### Real GPU-host acceptance
 
 The ignored acceptance test performs real hardware selection, immutable image
 and parameter inspection, one tiny correctness-plus-benchmark candidate, a
@@ -440,20 +511,7 @@ OPTIMUM_ADVISOR_GPU_ACCEPTANCE_IMAGE=repo/image@sha256:<digest>
 Run this only on a disposable or controlled GPU host: it pulls/starts real
 containers and performs real inference.
 
-## Development gates
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-targets --all-features --locked
-cargo build --release --all-features --locked
-cargo +1.85.0 test --all-targets --all-features --locked
-sh -n scripts/install.sh scripts/setup-correctness-env.sh
-```
-
-CI also runs RustSec `cargo audit` and ShellCheck.
-
-## Releases
+### Releases
 
 Releases are fully automated with [release-plz](https://release-plz.dev) in
 git-only mode (the crate is not published to crates.io):
@@ -477,7 +535,7 @@ not trigger PR CI; the gates run when the merge lands on `main`.
 
 ## Explicit limitations
 
-- execution is sequential and local, not distributed;
+- execution is sequential, one candidate at a time, not distributed;
 - the default Docker backend requires Docker and NVIDIA GPU support for real
   serving runs; the `--in-container` backend drops the Docker dependency but
   still needs the engine CLI and visible GPUs inside the container;
