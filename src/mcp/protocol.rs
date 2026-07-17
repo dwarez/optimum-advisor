@@ -18,6 +18,10 @@ use crate::{
 use super::{schema::tool_definitions, tools::call_tool_request};
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
+/// Older protocol revisions this server is wire-compatible with: everything
+/// it uses beyond them (tool annotations, `structuredContent`,
+/// `outputSchema`) is additive, so older clients simply ignore those fields.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26"];
 pub(super) const SERVER_NAME: &str = "optimum-advisor";
 pub(super) const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
@@ -323,19 +327,20 @@ fn handle_request(
                 return Some(rpc_error(id, -32602, message));
             }
         };
-        if params != PROTOCOL_VERSION {
-            lifecycle.disconnect = true;
-            return Some(rpc_error(
-                id,
-                -32602,
-                format!("incompatible protocol version: {params}"),
-            ));
-        }
+        // Spec-mandated negotiation: echo the requested version when this
+        // server supports it; otherwise answer with the latest version it
+        // speaks and let the client decide whether to continue. A mismatch is
+        // never a server-side error.
+        let negotiated = if SUPPORTED_PROTOCOL_VERSIONS.contains(&params) {
+            params
+        } else {
+            PROTOCOL_VERSION
+        };
         lifecycle.state = LifecycleState::AwaitingInitializedNotification;
         return Some(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": initialize()
+            "result": initialize(negotiated)
         }));
     }
     if lifecycle.state != LifecycleState::Ready {
@@ -384,16 +389,16 @@ fn initialize_params(params: &Value) -> std::result::Result<&str, String> {
     }
 }
 
-fn initialize() -> Value {
+fn initialize(negotiated_version: &str) -> Value {
     json!({
-        "protocolVersion": PROTOCOL_VERSION,
+        "protocolVersion": negotiated_version,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
             "name": SERVER_NAME,
             "version": env!("CARGO_PKG_VERSION"),
             "description": "Bounded inspection and evaluation tools for LLM serving configurations"
         },
-        "instructions": "Inspect hardware and immutable engine parameters, validate candidates, estimate memory, execute candidates and sweeps, and rank observations. Tool failures use the same typed error payload as CLI reports."
+        "instructions": "Find the best serving configuration for a model by measuring candidates. Typical workflow: inspect_hardware to learn the GPUs; inspect_engine to learn which serving arguments the image accepts; validate_config to check a candidate cheaply; then run_sweep (several candidates via [sweep] arrays) or evaluate_candidate (one candidate), which serve, optionally quality-check, and benchmark each candidate and return per-trial summaries; get_report and list_runs read results back later; rank_candidates orders observations you already hold. Execution tools run for many minutes and requests are processed sequentially. Configs use the same shape as schema-v2 TOML files. Tool failures are typed payloads with kind/stage/message."
     })
 }
 

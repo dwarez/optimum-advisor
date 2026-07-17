@@ -10,8 +10,8 @@ use crate::{
 
 use super::tools::{
     ConfigArgs, ConfigValidationOutput, EngineInspectionOutput, EvaluationSummary, ExecutionArgs,
-    InspectEngineArgs, InspectHardwareArgs, RankCandidatesArgs, RankCandidatesOutput,
-    ValidateConfigArgs,
+    GetReportArgs, InspectEngineArgs, InspectHardwareArgs, ListRunsArgs, ListRunsOutput,
+    RankCandidatesArgs, RankCandidatesOutput, ValidateConfigArgs,
 };
 
 #[derive(JsonSchema)]
@@ -26,21 +26,21 @@ pub(super) fn tool_definitions() -> Result<Vec<Value>> {
     Ok(vec![
         tool::<InspectHardwareArgs, HardwareProfile>(
             "inspect_hardware",
-            "Inspect selected local NVIDIA GPUs with bounded nvidia-smi execution.",
+            "Inspect selected local NVIDIA GPUs with bounded nvidia-smi execution. Selection mirrors runtime config: `gpus` picks the first N visible GPUs, `gpu_devices` picks exact indexes/UUIDs and must match `gpus` when both are set.",
             true,
             true,
             false,
         )?,
         tool::<InspectEngineArgs, EngineInspectionOutput>(
             "inspect_engine",
-            "Resolve an immutable image and inspect its runtime serving-parameter schema. Set offline only with an immutable image and a matching cache entry.",
+            "Resolve an immutable image and inspect its runtime serving-parameter schema. May pull the image (multi-gigabyte) when it is not already local; set offline only with an immutable image and a matching cache entry.",
             false,
             true,
             true,
         )?,
         tool::<ValidateConfigArgs, ConfigValidationOutput>(
             "validate_config",
-            "Normalize a canonical config, resolve its immutable image, and validate all serving arguments against the inspected schema.",
+            "Normalize a canonical config, resolve its immutable image, and validate all serving arguments against the inspected schema. May pull the image (multi-gigabyte) when it is not already local.",
             false,
             true,
             true,
@@ -61,28 +61,42 @@ pub(super) fn tool_definitions() -> Result<Vec<Value>> {
         )?,
         tool::<ExecutionArgs, EvaluationSummary>(
             "run_benchmark",
-            "Execute one candidate with correctness disabled and return a bounded summary plus the durable report path.",
+            "Execute one candidate with correctness disabled and return per-trial summaries plus the durable report path. Long-running: includes image pull, server startup, and the benchmark.",
             false,
             false,
             true,
         )?,
         tool::<ExecutionArgs, EvaluationSummary>(
             "evaluate_candidate",
-            "Execute one candidate through validation, optional correctness, benchmark, persistence, and report finalization.",
+            "Execute one candidate through validation, optional correctness, benchmark, persistence, and report finalization. Long-running: includes image pull, server startup, correctness, and the benchmark.",
             false,
             false,
             true,
         )?,
         tool::<ExecutionArgs, EvaluationSummary>(
             "run_sweep",
-            "Execute the bounded config sweep, preserve failed trials, and return a bounded summary plus the durable report path.",
+            "Execute the bounded config sweep, preserve failed trials, and return per-trial summaries plus the durable report path. Long-running: every candidate starts its own server.",
             false,
             false,
             true,
         )?,
         tool::<RankCandidatesArgs, RankCandidatesOutput>(
             "rank_candidates",
-            "Rank observed candidate values by correctness first and metric direction second with deterministic ID tie-breaking.",
+            "Rank observed candidate values by correctness first and metric direction second with deterministic ID tie-breaking. Omit a candidate's correctness when it was not evaluated; failed correctness always ranks last.",
+            true,
+            true,
+            false,
+        )?,
+        tool::<GetReportArgs, EvaluationSummary>(
+            "get_report",
+            "Summarize a durable report.json from a previous run: state, ranking, and per-trial metrics, correctness, and compact failures.",
+            true,
+            true,
+            false,
+        )?,
+        tool::<ListRunsArgs, ListRunsOutput>(
+            "list_runs",
+            "List prior runs under a results directory (newest first) with their state, trial counts, and best values.",
             true,
             true,
             false,

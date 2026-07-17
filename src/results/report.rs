@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::ExecutableConfig,
@@ -20,14 +20,14 @@ use super::{
     metrics::{select_best, BenchmarkMetrics, RankableObservation},
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RunKind {
     Bench,
     Sweep,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RunState {
     Running,

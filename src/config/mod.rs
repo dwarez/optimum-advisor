@@ -89,8 +89,14 @@ pub(crate) struct LeaderboardInput {
 #[derive(Clone, Debug, Default, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ConfigInput {
+    /// Optional in JSON contexts (MCP tools); when present it must be 2, so
+    /// configs copied from schema-v2 TOML files decode unchanged.
+    #[schemars(range(min = 2, max = 2))]
+    pub schema_version: Option<u32>,
+    #[schemars(required)]
     pub engine: Option<Engine>,
     pub image: Option<String>,
+    #[schemars(required)]
     pub model: Option<String>,
     pub metric: Option<Metric>,
     pub runtime: RuntimeInput,
@@ -121,6 +127,7 @@ impl ConfigInput {
             };
         }
 
+        replace!(self.schema_version, higher.schema_version);
         replace!(self.engine, higher.engine);
         replace!(self.image, higher.image);
         replace!(self.model, higher.model);

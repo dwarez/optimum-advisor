@@ -12,6 +12,12 @@ use crate::{
 pub(crate) const MAX_UNRECOGNIZED_METRICS: usize = 32;
 const MAX_DIAGNOSTIC_VALUE_CHARS: usize = 256;
 
+/// Metrics parsed from the engine benchmark's output.
+///
+/// A `null` field means the benchmark did not emit that line (engines print
+/// only the percentiles and aggregates they are configured for), not that the
+/// run failed. `unrecognized` collects metric-shaped lines this schema does
+/// not know yet, e.g. after an engine upgrade.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct BenchmarkMetrics {
     pub successful_requests: Option<f64>,
@@ -87,7 +93,9 @@ impl BenchmarkMetrics {
                         )));
                     }
                 }
-            } else if metrics.unrecognized.len() < MAX_UNRECOGNIZED_METRICS {
+            } else if metrics.unrecognized.len() < MAX_UNRECOGNIZED_METRICS
+                && looks_like_metric_label(label)
+            {
                 metrics.unrecognized.insert(
                     bounded_chars(label, MAX_DIAGNOSTIC_VALUE_CHARS),
                     bounded_chars(raw_value.trim(), MAX_DIAGNOSTIC_VALUE_CHARS),
@@ -273,6 +281,29 @@ fn correctness_rank(status: Option<CorrectnessStatus>) -> u8 {
     }
 }
 
+/// Diagnostic gate for the `unrecognized` map: keep lines that plausibly are
+/// engine metrics (e.g. new labels after an engine upgrade) and drop log
+/// noise such as `INFO 07-17 ...` timestamps or `Namespace(...)` dumps.
+fn looks_like_metric_label(label: &str) -> bool {
+    const LOG_PREFIXES: [&str; 5] = ["INFO", "WARNING", "ERROR", "DEBUG", "TRACE"];
+    if label.is_empty() || label.len() > 64 {
+        return false;
+    }
+    if LOG_PREFIXES.iter().any(|prefix| label.starts_with(prefix)) {
+        return false;
+    }
+    if !label.starts_with(|character: char| character.is_ascii_alphabetic()) {
+        return false;
+    }
+    label.chars().all(|character| {
+        character.is_ascii_alphanumeric()
+            || matches!(
+                character,
+                ' ' | '(' | ')' | '/' | '%' | '.' | ',' | '-' | '#'
+            )
+    })
+}
+
 fn first_finite_number(text: &str) -> Option<f64> {
     text.split_whitespace()
         .find_map(|word| {
@@ -366,6 +397,20 @@ mod tests {
             0.0f64.to_bits()
         );
         assert!(metrics.unrecognized.len() <= MAX_UNRECOGNIZED_METRICS);
+    }
+
+    #[test]
+    fn unrecognized_keeps_metric_shaped_lines_and_drops_log_noise() {
+        let text = "Output token throughput (tok/s): 10\n\
+                    INFO 07-17 13:49:09 [serve.py:123] engine ready: 1\n\
+                    WARNING 07-17 13:49:10 [sampling.py:44] temperature: 0.0\n\
+                    Namespace(model='Qwen/Qwen3-0.6B', seed=0): 1\n\
+                    Peak new metric (tok/s): 5\n";
+
+        let metrics = BenchmarkMetrics::parse(text, Metric::Tps).unwrap();
+
+        assert_eq!(metrics.unrecognized.len(), 1, "{:?}", metrics.unrecognized);
+        assert!(metrics.unrecognized.contains_key("Peak new metric (tok/s)"));
     }
 
     #[test]

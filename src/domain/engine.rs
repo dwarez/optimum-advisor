@@ -46,30 +46,54 @@ impl fmt::Display for Engine {
     }
 }
 
+/// Metric to optimize. Each value selects one field of the benchmark metrics:
+/// throughput metrics are higher-is-better, latency metrics lower-is-better.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
+    /// Output token throughput, tok/s (`output_token_throughput`); higher wins.
     Tps,
+    /// Input+output token throughput, tok/s (`total_token_throughput`); higher wins.
     TotalTps,
+    /// Input token throughput, tok/s (`input_token_throughput`); higher wins.
     InputTps,
+    /// Peak output token throughput, tok/s (`peak_output_token_throughput`); higher wins.
     PeakTps,
+    /// Request throughput, req/s (`request_throughput`); higher wins.
     ReqS,
+    /// Request goodput, req/s (`request_goodput`); higher wins.
     Goodput,
+    /// Mean time to first token, ms (`mean_ttft_ms`); lower wins.
     Ttft,
+    /// P90 time to first token, ms (`p90_ttft_ms`); lower wins.
     P90Ttft,
+    /// P95 time to first token, ms (`p95_ttft_ms`); lower wins.
     P95Ttft,
+    /// P99 time to first token, ms (`p99_ttft_ms`); lower wins.
     P99Ttft,
+    /// Mean time per output token, ms (`mean_tpot_ms`); lower wins.
     Tpot,
+    /// P90 time per output token, ms (`p90_tpot_ms`); lower wins.
     P90Tpot,
+    /// P95 time per output token, ms (`p95_tpot_ms`); lower wins.
     P95Tpot,
+    /// P99 time per output token, ms (`p99_tpot_ms`); lower wins.
     P99Tpot,
+    /// Mean inter-token latency, ms (`mean_itl_ms`); lower wins.
     Itl,
+    /// P90 inter-token latency, ms (`p90_itl_ms`); lower wins.
     P90Itl,
+    /// P95 inter-token latency, ms (`p95_itl_ms`); lower wins.
     P95Itl,
+    /// P99 inter-token latency, ms (`p99_itl_ms`); lower wins.
     P99Itl,
+    /// Mean end-to-end request latency, ms (`mean_e2e_ms`); lower wins.
     E2e,
+    /// P90 end-to-end request latency, ms (`p90_e2e_ms`); lower wins.
     P90E2e,
+    /// P95 end-to-end request latency, ms (`p95_e2e_ms`); lower wins.
     P95E2e,
+    /// P99 end-to-end request latency, ms (`p99_e2e_ms`); lower wins.
     P99E2e,
 }
 

@@ -94,6 +94,7 @@ pub(super) fn into_input(file: ConfigFile) -> Result<ConfigInput> {
     let serve_args = parse_serve_table(file.serve, "serve")?;
     let sweep = file.sweep.map(parse_sweep).transpose()?;
     Ok(ConfigInput {
+        schema_version: Some(file.schema_version),
         engine: file.engine,
         image: file.image,
         model: file.model,
