@@ -227,9 +227,9 @@ pub(crate) fn validate_candidate(candidate: &Candidate, gpus: usize) -> Result<(
             "candidate.tensor_parallelism must be greater than zero",
         ));
     }
-    if candidate.tensor_parallelism > gpus || gpus % candidate.tensor_parallelism != 0 {
+    if candidate.tensor_parallelism > gpus {
         return Err(Error::validation(format!(
-            "candidate.tensor_parallelism {} must not exceed and must evenly divide requested GPU count {gpus}",
+            "candidate.tensor_parallelism {} must not exceed requested GPU count {gpus}",
             candidate.tensor_parallelism
         )));
     }
@@ -439,6 +439,15 @@ mod tests {
     }
 
     #[test]
+    fn allows_parallelism_that_does_not_divide_gpu_pool() {
+        let mut input = ConfigInput::minimal(Engine::Vllm, "m");
+        input.runtime.gpus = Some(4);
+        input.candidate.tensor_parallelism = Some(3);
+
+        assert!(input.normalize().is_ok());
+    }
+
+    #[test]
     fn rejects_parallelism_instead_of_clamping() {
         let mut input = ConfigInput::minimal(Engine::Vllm, "m");
         input.runtime.gpus = Some(2);
@@ -446,7 +455,7 @@ mod tests {
 
         let error = input.normalize().unwrap_err();
 
-        assert!(error.to_string().contains("divide"));
+        assert!(error.to_string().contains("must not exceed"));
     }
 
     #[test]

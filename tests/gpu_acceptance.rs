@@ -146,6 +146,13 @@ fn production_gpu_host_acceptance() {
     let sweep_report = read_report(&sweep_results);
     assert_terminal_success(&sweep_report, 2);
     assert!(sweep_report["best_config_path"].as_str().is_some());
+    if env::var("OPTIMUM_ADVISOR_GPU_ACCEPTANCE_GPUS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|gpus| gpus >= 2)
+    {
+        assert_parallel_sweep_acceptance(&workspace, &engine, image.as_deref(), &model);
+    }
 
     let child = command()
         .args(["serve", "--config"])
@@ -171,6 +178,76 @@ fn production_gpu_host_acceptance() {
         stdout(&before),
         "owned Docker containers leaked"
     );
+}
+
+fn assert_parallel_sweep_acceptance(
+    workspace: &TempDir,
+    engine: &str,
+    image: Option<&str>,
+    model: &str,
+) {
+    let mut roots = Vec::new();
+    let mut reports = Vec::new();
+    for cap in [1, 2] {
+        let config_path = workspace.path().join(format!("sweep-cap-{cap}.toml"));
+        let text = config(engine, image, model, true)
+            .replace("gpus = 1", "gpus = 2")
+            .replace(
+                "[sweep]\n",
+                &format!("[sweep]\nmax_parallel_trials = {cap}\n"),
+            );
+        fs::write(&config_path, text).unwrap();
+        let results = workspace.path().join(format!("sweep-cap-{cap}-results"));
+        run_owned(&[
+            "sweep".to_string(),
+            "--config".to_string(),
+            config_path.display().to_string(),
+            "--results-dir".to_string(),
+            results.display().to_string(),
+        ]);
+        let report = read_report(&results);
+        assert_terminal_success(&report, 2);
+        roots.push(results);
+        reports.push(report);
+    }
+
+    let sequential = &reports[0];
+    let parallel = &reports[1];
+    for index in 0..2 {
+        assert_eq!(
+            sequential["trials"][index]["config"]["candidate"],
+            parallel["trials"][index]["config"]["candidate"]
+        );
+        assert_eq!(parallel["trials"][index]["index"], index);
+        assert_eq!(parallel["trials"][index]["status"], "success");
+    }
+    let first = parallel["trials"][0]["allocation"]["gpu_devices"]
+        .as_array()
+        .unwrap();
+    let second = parallel["trials"][1]["allocation"]["gpu_devices"]
+        .as_array()
+        .unwrap();
+    assert_eq!(first.len(), 1);
+    assert_eq!(second.len(), 1);
+    assert_ne!(first, second, "parallel trials must lease disjoint GPUs");
+    assert_ne!(
+        parallel["trials"][0]["allocation"]["host_port"],
+        parallel["trials"][1]["allocation"]["host_port"]
+    );
+    assert!(sequential["best_trial_index"].as_u64().is_some());
+    assert!(parallel["best_trial_index"].as_u64().is_some());
+    for root in roots {
+        let report_path = fs::read_dir(&root)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("best.toml");
+        assert!(!fs::read_to_string(report_path)
+            .unwrap()
+            .contains("gpu_devices"));
+    }
 }
 
 fn command() -> Command {

@@ -162,6 +162,9 @@ enum CliCommand {
         results_dir: PathBuf,
         #[arg(long)]
         dry_run: bool,
+        /// Maximum trials to execute concurrently; defaults to automatic GPU packing.
+        #[arg(long)]
+        max_parallel_trials: Option<usize>,
         /// Run engine processes directly instead of via Docker, for use inside a
         /// container that already provides the engine image (e.g. a Hugging Face Job).
         #[arg(long)]
@@ -380,15 +383,23 @@ pub(crate) fn parse(args: impl Iterator<Item = String>) -> Result<ParsedCli> {
             config,
             results_dir,
             dry_run,
+            max_parallel_trials,
             in_container,
             hf,
         } => {
             let (target, hf_jobs) = resolve_hf_jobs(hf, Some(config.as_path()), false)?;
-            let input = ConfigInput::try_from(load_config(&config)?)?;
+            let mut input = ConfigInput::try_from(load_config(&config)?)?;
             if input.sweep.is_none() {
                 return Err(Error::validation(
                     "sweep requires a nonempty [sweep] configuration",
                 ));
+            }
+            if let Some(max_parallel_trials) = max_parallel_trials {
+                input
+                    .sweep
+                    .as_mut()
+                    .expect("sweep presence was checked")
+                    .max_parallel_trials = Some(max_parallel_trials);
             }
             Invocation {
                 kind: CommandKind::Sweep,
@@ -604,6 +615,9 @@ fn reject_duplicate_dynamic(arguments: &[DynamicArg]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    use tempfile::tempdir;
 
     #[test]
     fn parses_help_without_an_error_exit() {
@@ -630,6 +644,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.exit_code(), 2);
+    }
+
+    #[test]
+    fn sweep_cli_overrides_parallel_trial_cap() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("sweep.toml");
+        fs::write(
+            &config,
+            "schema_version=2\nengine='vllm'\nmodel='m'\n[sweep]\ntensor_parallelism=[1]",
+        )
+        .unwrap();
+
+        let parsed = parse(
+            [
+                "sweep".to_string(),
+                "--config".to_string(),
+                config.display().to_string(),
+                "--max-parallel-trials".to_string(),
+                "2".to_string(),
+                "--dry-run".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        let ParsedCli::Invocation(invocation) = parsed else {
+            panic!("expected invocation");
+        };
+
+        assert_eq!(invocation.input.sweep.unwrap().max_parallel_trials, Some(2));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crate::{
     error::{Error, ErrorKind, ErrorPayload, ExecutionStage, Result},
     inspection::correctness::{CorrectnessResult, CorrectnessStatus},
     runtime::atomic::{atomic_write, create_private_dir},
+    sweep::TrialAllocation,
 };
 
 use super::{
@@ -36,8 +37,7 @@ pub(crate) enum RunState {
     Failed,
     Interrupted,
 }
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct WarningRecord {
     pub kind: ErrorKind,
     pub stage: ExecutionStage,
@@ -101,6 +101,7 @@ pub(crate) enum TrialOutcome {
         metrics: BenchmarkMetrics,
         correctness: Option<CorrectnessResult>,
         model_memory: ModelMemoryOutcome,
+        allocation: Option<TrialAllocation>,
         artifacts: Vec<ArtifactManifest>,
     },
     Failed {
@@ -111,6 +112,7 @@ pub(crate) enum TrialOutcome {
         correctness: Option<CorrectnessResult>,
         model_memory: ModelMemoryOutcome,
         artifacts: Vec<ArtifactManifest>,
+        allocation: Option<TrialAllocation>,
     },
 }
 
@@ -145,6 +147,7 @@ pub(crate) struct RunReport {
     pub winning_metric: Metric,
     pub requested_image: String,
     pub resolved_image: Option<ResolvedImage>,
+    pub warnings: Vec<WarningRecord>,
     pub selected_hardware: Option<HardwareProfile>,
     pub started_at_unix_ms: u64,
     pub ended_at_unix_ms: Option<u64>,
@@ -169,6 +172,7 @@ impl RunReport {
             requested_image: request.requested_image,
             resolved_image: None,
             selected_hardware: None,
+            warnings: Vec::new(),
             started_at_unix_ms,
             ended_at_unix_ms: None,
             duration_ms: None,
@@ -198,6 +202,20 @@ impl RunReport {
         }
         self.resolved_image = Some(resolved_image);
         self.selected_hardware = Some(selected_hardware);
+        Ok(())
+    }
+    pub(crate) fn push_warning(&mut self, warning: WarningRecord) -> Result<()> {
+        if self.state != RunState::Running {
+            return Err(report_validation(
+                "cannot append a warning to a final report",
+            ));
+        }
+        if warning.message.trim().is_empty() {
+            return Err(report_validation(
+                "report warning message must not be empty",
+            ));
+        }
+        self.warnings.push(warning);
         Ok(())
     }
 
@@ -339,6 +357,15 @@ impl RunReport {
         if self.requested_image.trim().is_empty() {
             return Err(report_validation(
                 "report requested_image must not be empty",
+            ));
+        }
+        if self
+            .warnings
+            .iter()
+            .any(|warning| warning.message.trim().is_empty())
+        {
+            return Err(report_validation(
+                "report warning message must not be empty",
             ));
         }
         for (expected, trial) in self.trials.iter().enumerate() {
@@ -584,6 +611,31 @@ mod tests {
     }
 
     #[test]
+    fn serializes_trial_allocations_and_top_level_warnings() {
+        let mut report = running_report();
+        report
+            .push_warning(WarningRecord {
+                kind: ErrorKind::Validation,
+                stage: ExecutionStage::Preflight,
+                message: "parallel execution unavailable; using one lane".into(),
+            })
+            .unwrap();
+        report
+            .set_preflight(resolved_image(), hardware_profile())
+            .unwrap();
+        report.push_trial(success(0, 1.0)).unwrap();
+
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(value["warnings"][0]["stage"], "preflight");
+        assert_eq!(
+            value["trials"][0]["allocation"]["gpu_devices"],
+            serde_json::json!(["GPU-7"])
+        );
+        assert_eq!(value["trials"][0]["allocation"]["host_port"], 8_000);
+    }
+
+    #[test]
     fn invalid_finish_is_transactional_and_early_failure_needs_no_preflight() {
         let mut invalid = running_report();
         assert!(invalid.finish(RunState::Completed, 1_100, None).is_err());
@@ -710,6 +762,7 @@ mod tests {
             .unwrap(),
             correctness: None,
             model_memory: ModelMemoryOutcome::default(),
+            allocation: Some(test_allocation()),
             artifacts: Vec::new(),
         }
     }
@@ -741,7 +794,15 @@ mod tests {
             ),
             correctness: None,
             model_memory: ModelMemoryOutcome::default(),
+            allocation: Some(test_allocation()),
             artifacts: Vec::new(),
+        }
+    }
+    fn test_allocation() -> crate::sweep::TrialAllocation {
+        crate::sweep::TrialAllocation {
+            gpu_devices: vec!["GPU-7".into()],
+            host_port: 8_000,
+            lane: 0,
         }
     }
 }

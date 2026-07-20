@@ -205,6 +205,34 @@ fn hf_jobs_image_override_selects_and_forwards_the_job_image() {
 }
 
 #[test]
+fn hf_jobs_sweep_forwards_effective_parallelism_override() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(
+        &directory,
+        &(HF_JOBS_CONFIG.to_string()
+            + "\n[sweep]\nmax_trials = 2\nmax_parallel_trials = 0\nmax_running_requests = [1, 2]\n"),
+    );
+    let output = run(&[
+        "sweep",
+        "--config",
+        config.to_str().unwrap(),
+        "--max-parallel-trials",
+        "1",
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(stdout(&output).contains(
+        "sweep --in-container --config /tmp/optimum-advisor-config.toml \
+         --results-dir /tmp/optimum-advisor-results --max-parallel-trials 1"
+    ));
+}
+
+#[test]
 fn hf_jobs_requires_flavor_config_and_forbids_overrides() {
     let directory = TempDir::new().unwrap();
     let config = write_config(&directory, HF_JOBS_CONFIG);
@@ -475,6 +503,7 @@ fn mcp_stdio_is_protocol_clean_and_returns_structured_results() {
 mod execution {
     use std::{
         os::unix::fs::PermissionsExt,
+        sync::atomic::{AtomicU16, Ordering},
         thread,
         time::{Duration, Instant},
     };
@@ -482,6 +511,21 @@ mod execution {
     use super::*;
 
     const TOKEN: &str = "hf_production_secret_fixture";
+    static NEXT_FAKE_PORT: AtomicU16 = AtomicU16::new(30_000);
+
+    fn allocate_fake_port_range() -> u16 {
+        loop {
+            let port = NEXT_FAKE_PORT.fetch_add(4, Ordering::Relaxed);
+            let Ok(first) = TcpListener::bind(("127.0.0.1", port)) else {
+                continue;
+            };
+            let Ok(second) = TcpListener::bind(("127.0.0.1", port + 1)) else {
+                continue;
+            };
+            drop((first, second));
+            return port;
+        }
+    }
 
     struct FakeRuntime {
         directory: TempDir,
@@ -532,6 +576,7 @@ case "$*" in
 esac
 benchmark=false
 binding=
+name=
 previous=
 for argument in "$@"; do
     if [ "$argument" = "--network" ]; then
@@ -540,12 +585,33 @@ for argument in "$@"; do
     if [ "$previous" = "-p" ]; then
         binding=$argument
     fi
+    if [ "$previous" = "--name" ]; then
+        name=$argument
+    fi
     previous=$argument
 done
 if [ "$benchmark" = true ]; then
-    printf '%s\n' started > "$FAKE_EVENTS"
+    if [ "${TRACK_PARALLEL:-0}" = "1" ]; then
+        printf 'start %s\n' "$name" >> "$FAKE_EVENTS"
+        if [ "${OUT_OF_ORDER:-0}" = "1" ]; then
+            case "$name" in
+                *trial-0-benchmark*) sleep 1 ;;
+                *) sleep 0.2 ;;
+            esac
+        else
+            sleep 1
+        fi
+        printf 'end %s\n' "$name" >> "$FAKE_EVENTS"
+    else
+        printf '%s\n' started > "$FAKE_EVENTS"
+    fi
     if [ "${SLOW_BENCH:-0}" = "1" ]; then
         sleep 30
+    fi
+    if [ "${FAIL_FIRST_BENCH:-0}" = "1" ]; then
+        case "$*" in
+            *trial-0-benchmark*) exit 9 ;;
+        esac
     fi
     if [ "${FAIL_BENCH:-0}" = "1" ]; then
         printf 'benchmark credential=%s\n' "${HF_TOKEN:-missing}" >&2
@@ -601,14 +667,12 @@ fi
             let nvidia_smi = bin.join("nvidia-smi");
             fs::write(
                 &nvidia_smi,
-                "#!/bin/sh\nprintf '%s\\n' '0, Test GPU, GPU-test, 9.0, 24576, 24000, 576'\n",
+                "#!/bin/sh\nprintf '%s\\n' '0, Test GPU, GPU-test-0, 9.0, 24576, 24000, 576'\nif [ \"${TWO_GPUS:-0}\" = \"1\" ]; then printf '%s\\n' '1, Test GPU, GPU-test-1, 9.0, 24576, 24000, 576'; fi\n",
             )
             .unwrap();
             fs::set_permissions(&nvidia_smi, fs::Permissions::from_mode(0o700)).unwrap();
 
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let port = listener.local_addr().unwrap().port();
-            drop(listener);
+            let port = allocate_fake_port_range();
             let results = directory.path().join("results");
             let events = directory.path().join("events");
             let server_events = directory.path().join("server-events");
@@ -674,6 +738,39 @@ enabled = false
                 .env("HOME", self.directory.path())
                 .current_dir(self.directory.path())
                 .env("FAIL_BENCH", if fail_benchmark { "1" } else { "0" });
+            command
+        }
+
+        fn configure_parallel_sweep(&self) {
+            let config = fs::read_to_string(&self.config)
+                .unwrap()
+                .replace("[runtime]\n", "[runtime]\ngpus = 2\n")
+                + "\n[sweep]\nmax_trials = 2\nmax_parallel_trials = 2\nmax_running_requests = [1, 2]\n";
+            fs::write(&self.config, config).unwrap();
+        }
+
+        fn sweep_command(&self) -> Command {
+            let mut path = self.bin.as_os_str().to_os_string();
+            path.push(":");
+            path.push(std::env::var_os("PATH").unwrap_or_default());
+            let mut command = super::command();
+            command.args([
+                "sweep",
+                "--config",
+                self.config.to_str().unwrap(),
+                "--results-dir",
+                self.results.to_str().unwrap(),
+            ]);
+            command
+                .env("PATH", path)
+                .env("HF_TOKEN", TOKEN)
+                .env("FAKE_SERVER", &self.server)
+                .env("FAKE_EVENTS", &self.events)
+                .env("FAKE_SERVER_EVENTS", &self.server_events)
+                .env("HOME", self.directory.path())
+                .env("FAIL_BENCH", "0")
+                .env("TWO_GPUS", "1")
+                .current_dir(self.directory.path());
             command
         }
 
@@ -782,6 +879,77 @@ enabled = false
     }
 
     #[test]
+    fn docker_sweep_overlaps_disjoint_gpu_trials_and_preserves_logical_best_config() {
+        let runtime = FakeRuntime::new();
+        runtime.configure_parallel_sweep();
+        let output = runtime
+            .sweep_command()
+            .env("TRACK_PARALLEL", "1")
+            .env("OUT_OF_ORDER", "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", stderr(&output));
+        let events = fs::read_to_string(&runtime.events).unwrap();
+        let events = events.lines().collect::<Vec<_>>();
+        assert_eq!(events.len(), 4, "{events:?}");
+        assert!(events[0].starts_with("start "), "{events:?}");
+        assert!(events[1].starts_with("start "), "{events:?}");
+        assert!(events[2].contains("trial-1-benchmark"), "{events:?}");
+        assert!(events[3].contains("trial-0-benchmark"), "{events:?}");
+        let path = report_path(&runtime.results);
+        let report: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let first = &report["trials"][0]["allocation"];
+        let second = &report["trials"][1]["allocation"];
+        assert_eq!(first["gpu_devices"], serde_json::json!(["0"]));
+        assert_eq!(second["gpu_devices"], serde_json::json!(["1"]));
+        assert_ne!(first["host_port"], second["host_port"]);
+        assert!(stderr(&output).contains("trial_started:"));
+        assert!(stderr(&output).contains("trial_completed:"));
+        let best = fs::read_to_string(path.parent().unwrap().join("best.toml")).unwrap();
+        assert!(!best.contains("gpu_devices"));
+    }
+
+    #[test]
+    fn failed_parallel_candidate_does_not_cancel_its_sibling() {
+        let runtime = FakeRuntime::new();
+        runtime.configure_parallel_sweep();
+        let output = runtime
+            .sweep_command()
+            .env("FAIL_FIRST_BENCH", "1")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{}", stderr(&output));
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(report_path(&runtime.results)).unwrap())
+                .unwrap();
+        assert_eq!(report["state"], "completed_with_failures");
+        assert_eq!(report["trials"][0]["status"], "failed");
+        assert_eq!(report["trials"][1]["status"], "success");
+        assert_eq!(report["best_trial_index"], 1);
+    }
+
+    #[test]
+    fn parallel_lane_preflight_failure_finalizes_the_report() {
+        let runtime = FakeRuntime::new();
+        runtime.configure_parallel_sweep();
+        let config = fs::read_to_string(&runtime.config)
+            .unwrap()
+            .replace(&format!("port = {}", runtime.port), "port = 65535");
+        fs::write(&runtime.config, config).unwrap();
+
+        let output = runtime.sweep_command().output().unwrap();
+
+        assert!(!output.status.success());
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(report_path(&runtime.results)).unwrap())
+                .unwrap();
+        assert_eq!(report["state"], "failed");
+        assert_eq!(report["run_failure"]["stage"], "preflight");
+    }
+
+    #[test]
     fn below_threshold_correctness_is_a_failed_trial_not_an_invalid_success() {
         let runtime = FakeRuntime::new();
         let config = fs::read_to_string(&runtime.config).unwrap().replace(
@@ -872,6 +1040,49 @@ enabled = false
         assert!(!report["ended_at_unix_ms"].is_null());
     }
 
+    #[test]
+    fn interrupt_cancels_all_parallel_trials_and_finalizes_report() {
+        let runtime = FakeRuntime::new();
+        runtime.configure_parallel_sweep();
+        let mut command = runtime.sweep_command();
+        command
+            .env("TRACK_PARALLEL", "1")
+            .env("SLOW_BENCH", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let starts = fs::read_to_string(&runtime.events)
+                .unwrap_or_default()
+                .lines()
+                .filter(|line| line.starts_with("start "))
+                .count();
+            if starts == 2 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap();
+                panic!("parallel benchmarks did not start: {}", stderr(&output));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(child.id() as i32),
+            nix::sys::signal::Signal::SIGINT,
+        )
+        .unwrap();
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(output.status.code(), Some(130), "{}", stderr(&output));
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(report_path(&runtime.results)).unwrap())
+                .unwrap();
+        assert_eq!(report["state"], "interrupted");
+        assert_eq!(report["run_failure"]["kind"], "interrupted");
+    }
     #[test]
     fn cleanup_cli_lists_owned_containers_without_removing_in_dry_run() {
         let runtime = FakeRuntime::new();

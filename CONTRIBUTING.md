@@ -22,6 +22,10 @@ The ignored acceptance test performs real hardware selection, immutable image
 and parameter inspection, one tiny correctness-plus-benchmark candidate, a
 two-candidate sweep, SIGINT cleanup, report-v2 checks, winning-config checks,
 and owned-container leak comparison. It does not fake GPU success.
+On hosts with at least two GPUs, setting
+`OPTIMUM_ADVISOR_GPU_ACCEPTANCE_GPUS=2` additionally compares sequential and
+parallel two-candidate sweeps, verifies disjoint leases/ports, and confirms
+that physical lease IDs stay out of `best.toml`.
 
 Prepare the correctness environment, choose a model appropriate for the host,
 and opt in explicitly:
@@ -40,6 +44,7 @@ Optional overrides:
 ```bash
 OPTIMUM_ADVISOR_GPU_ACCEPTANCE_ENGINE=sglang
 OPTIMUM_ADVISOR_GPU_ACCEPTANCE_IMAGE=repo/image@sha256:<digest>
+OPTIMUM_ADVISOR_GPU_ACCEPTANCE_GPUS=2
 ```
 
 Run this only on a disposable or controlled GPU host: it pulls/starts real
