@@ -48,7 +48,7 @@ fn cancellation_keeps_the_binary_server_ready() {
     let listed = response(&receiver);
     assert_eq!(listed["id"], 2);
     let tools = listed["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 11);
     assert!(tools.iter().all(|tool| {
         tool["inputSchema"]["additionalProperties"] == false && tool["outputSchema"].is_object()
     }));
