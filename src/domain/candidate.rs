@@ -21,12 +21,20 @@ pub(crate) struct Candidate {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct CandidateOverrides {
+    /// Number of GPUs assigned to one engine replica. This owns engine flags
+    /// such as `--tensor-parallel-size` and `--tp-size`.
     #[schemars(range(min = 1))]
     pub tensor_parallelism: Option<usize>,
+    /// Fraction of GPU memory available to the engine. Set this instead of
+    /// passing `gpu-memory-utilization` or `mem-fraction-static` in `serve_args`.
     #[schemars(range(min = 0.0, max = 1.0))]
     pub memory_fraction: Option<f64>,
+    /// Maximum tokens admitted in one prefill batch. Set this instead of
+    /// passing `max-num-batched-tokens` or `chunked-prefill-size` in `serve_args`.
     #[schemars(range(min = 1))]
     pub prefill_token_budget: Option<u32>,
+    /// Maximum concurrent requests admitted by the engine. Set this instead of
+    /// passing `max-num-seqs` or `max-running-requests` in `serve_args`.
     #[schemars(range(min = 1))]
     pub max_running_requests: Option<u32>,
 }
@@ -313,11 +321,37 @@ pub(crate) fn validate_dynamic_name(name: &str) -> Result<()> {
         )));
     }
     if is_reserved_dynamic_name(name) {
-        return Err(Error::validation(format!(
-            "dynamic argument {name:?} is owned by normalized configuration"
-        )));
+        let message = replacement_for_reserved_dynamic_name(name).map_or_else(
+            || format!("dynamic argument {name:?} is owned by normalized configuration"),
+            |field| {
+                format!(
+                    "dynamic argument {name:?} is owned by normalized configuration; \
+                     set {field} instead"
+                )
+            },
+        );
+        return Err(Error::validation(message));
     }
     Ok(())
+}
+
+fn replacement_for_reserved_dynamic_name(name: &str) -> Option<&'static str> {
+    match name {
+        "model" | "model-path" | "served-model-name" => Some("model"),
+        "port" => Some("runtime.port"),
+        "tensor-parallel-size" | "tensor-parallelism" | "tp-size" | "tp" => {
+            Some("candidate.tensor_parallelism")
+        }
+        "mem-fraction-static" | "memory-fraction" | "gpu-memory-utilization" => {
+            Some("candidate.memory_fraction")
+        }
+        "max-model-len" => Some("runtime.max_model_len"),
+        "chunked-prefill-size" | "max-num-batched-tokens" | "prefill-token-budget" => {
+            Some("candidate.prefill_token_budget")
+        }
+        "max-num-seqs" | "max-running-requests" => Some("candidate.max_running_requests"),
+        _ => None,
+    }
 }
 
 fn is_reserved_dynamic_name(name: &str) -> bool {

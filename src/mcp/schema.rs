@@ -61,7 +61,7 @@ pub(super) fn tool_definitions() -> Result<Vec<Value>> {
         )?,
         tool::<ExecutionArgs, EvaluationSummary>(
             "run_benchmark",
-            "Execute one candidate with correctness disabled and return per-trial summaries plus the durable report path. Long-running: includes image pull, server startup, and the benchmark.",
+            "Execute one candidate with correctness disabled and return per-trial summaries plus the durable report path. Long-running: includes image pull, server startup, and the benchmark. The selected metric must be emitted by that engine image; otherwise the objective fails, but parsed metrics remain available through get_report.",
             false,
             false,
             true,

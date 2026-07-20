@@ -121,8 +121,8 @@ complete; everything else has defaults. Full reference:
 schema_version = 2
 engine = "vllm"                # vllm | sglang
 model = "Qwen/Qwen3-4B-Instruct-2507"
-metric = "tps"                 # tps | total_tps | input_tps | peak_tps | req_s |
-                               # goodput | ttft | tpot | itl | e2e | p90/p95/p99 variants
+metric = "tps"                 # optional objective: throughput/latency and p90/p95/p99 variants
+                               # omit: tpot for model IDs up to 3B, tps otherwise
 image = "vllm/vllm-openai:latest"  # optional; defaults to the engine's image
 
 [runtime]
@@ -296,8 +296,9 @@ Every executed run creates a private directory (default under
 A failed candidate does not abort a sweep: each failure records a typed
 stage/kind and bounded stdout/stderr tails. Ranking considers correctness
 first, then the selected metric, then stable trial order; a candidate with a
-missing or non-finite metric cannot win. Directories are mode `0700`, sensitive
-files `0600`.
+missing or non-finite objective cannot win. Metrics the benchmark did emit
+remain in `report.json`, and the error lists the finite metric names available
+from that engine image. Directories are mode `0700`, sensitive files `0600`.
 
 ## Correctness checks
 

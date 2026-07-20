@@ -551,7 +551,14 @@ if [ "$benchmark" = true ]; then
         printf 'benchmark credential=%s\n' "${HF_TOKEN:-missing}" >&2
         exit 9
     fi
-    printf '%s\n' 'Successful requests: 4' 'Failed requests: 0' 'Output token throughput (tok/s): 42.5'
+    printf '%s\n' \
+        'Successful requests: 4' \
+        'Failed requests: 0' \
+        'Request throughput (req/s): 1.25' \
+        'Output token throughput (tok/s): 42.5' \
+        'Mean TTFT (ms): 24.95' \
+        'Mean TPOT (ms): 6.09' \
+        'Mean ITL (ms): 6.09'
     exit 0
 fi
 if [ -n "$binding" ]; then
@@ -726,6 +733,52 @@ enabled = false
             0o700
         );
         assert!(runtime.port > 0);
+    }
+
+    #[test]
+    fn omitted_metric_uses_tiny_model_latency_default_end_to_end() {
+        let runtime = FakeRuntime::new();
+        let config = fs::read_to_string(&runtime.config)
+            .unwrap()
+            .replace("model = \"repo/model\"", "model = \"Qwen/Qwen3-0.6B\"")
+            .replace("metric = \"tps\"\n", "");
+        fs::write(&runtime.config, config).unwrap();
+
+        let output = runtime.command(false).output().unwrap();
+
+        assert!(output.status.success(), "{}", stderr(&output));
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(report_path(&runtime.results)).unwrap())
+                .unwrap();
+        assert_eq!(report["winning_metric"], "tpot");
+        assert_eq!(report["best_winning_value"], 6.09);
+    }
+
+    #[test]
+    fn missing_selected_metric_preserves_observed_benchmark_metrics() {
+        let runtime = FakeRuntime::new();
+        let config = fs::read_to_string(&runtime.config)
+            .unwrap()
+            .replace("metric = \"tps\"", "metric = \"e2e\"");
+        fs::write(&runtime.config, config).unwrap();
+
+        let output = runtime.command(false).output().unwrap();
+
+        assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+        assert!(stderr(&output).contains("selected metric e2e was not emitted"));
+        assert!(stderr(&output).contains("available finite metrics: tps, req_s, ttft, tpot, itl"));
+        let report: Value =
+            serde_json::from_str(&fs::read_to_string(report_path(&runtime.results)).unwrap())
+                .unwrap();
+        assert_eq!(report["state"], "failed");
+        assert_eq!(report["trials"][0]["status"], "failed");
+        assert_eq!(
+            report["trials"][0]["metrics"]["output_token_throughput"],
+            42.5
+        );
+        assert_eq!(report["trials"][0]["metrics"]["mean_ttft_ms"], 24.95);
+        assert_eq!(report["trials"][0]["metrics"]["mean_tpot_ms"], 6.09);
+        assert_eq!(report["trials"][0]["metrics"]["mean_itl_ms"], 6.09);
     }
 
     #[test]

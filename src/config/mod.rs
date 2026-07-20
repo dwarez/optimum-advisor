@@ -34,6 +34,8 @@ pub(crate) struct RuntimeInput {
     pub bind_host: Option<IpAddr>,
     #[schemars(range(min = 1))]
     pub port: Option<u16>,
+    /// Maximum model context length. Set this instead of passing
+    /// `max-model-len` in `serve_args`.
     #[schemars(range(min = 1))]
     pub max_model_len: Option<u32>,
     #[schemars(range(min = 1))]
@@ -98,6 +100,10 @@ pub(crate) struct ConfigInput {
     pub image: Option<String>,
     #[schemars(required)]
     pub model: Option<String>,
+    /// Optimization objective. When omitted, models whose IDs declare at most 3B
+    /// parameters default to `tpot` (decode latency); all others default to `tps`.
+    /// Set this explicitly when the model name does not encode its parameter count
+    /// or when the intended workload favors a different objective.
     pub metric: Option<Metric>,
     pub runtime: RuntimeInput,
     pub benchmark: BenchmarkInput,
@@ -105,6 +111,10 @@ pub(crate) struct ConfigInput {
     pub correctness: CorrectnessInput,
     pub model_memory: ModelMemoryInput,
     pub leaderboard: LeaderboardInput,
+    /// Extra engine-specific serving arguments only. Do not duplicate fields
+    /// managed by normalized configuration: use `candidate.max_running_requests`
+    /// for `max-num-seqs`, `runtime.max_model_len` for `max-model-len`, and
+    /// `candidate.memory_fraction` for `gpu-memory-utilization`.
     pub serve_args: Vec<DynamicArg>,
     pub sweep: Option<SweepSpec>,
 }

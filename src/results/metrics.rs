@@ -11,6 +11,30 @@ use crate::{
 
 pub(crate) const MAX_UNRECOGNIZED_METRICS: usize = 32;
 const MAX_DIAGNOSTIC_VALUE_CHARS: usize = 256;
+const OPTIMIZATION_METRICS: [Metric; 22] = [
+    Metric::Tps,
+    Metric::TotalTps,
+    Metric::InputTps,
+    Metric::PeakTps,
+    Metric::ReqS,
+    Metric::Goodput,
+    Metric::Ttft,
+    Metric::P90Ttft,
+    Metric::P95Ttft,
+    Metric::P99Ttft,
+    Metric::Tpot,
+    Metric::P90Tpot,
+    Metric::P95Tpot,
+    Metric::P99Tpot,
+    Metric::Itl,
+    Metric::P90Itl,
+    Metric::P95Itl,
+    Metric::P99Itl,
+    Metric::E2e,
+    Metric::P90E2e,
+    Metric::P95E2e,
+    Metric::P99E2e,
+];
 
 /// Metrics parsed from the engine benchmark's output.
 ///
@@ -72,7 +96,7 @@ pub(crate) struct BenchmarkMetrics {
 }
 
 impl BenchmarkMetrics {
-    pub(crate) fn parse(text: &str, selected: Metric) -> Result<Self> {
+    pub(crate) fn parse(text: &str) -> Result<Self> {
         let mut metrics = Self::default();
         let mut recognized: BTreeMap<String, Option<f64>> = BTreeMap::new();
         for line in text.lines() {
@@ -103,9 +127,21 @@ impl BenchmarkMetrics {
             }
         }
 
-        let selected_value = metrics.value_for(selected).ok_or_else(|| {
+        Ok(metrics)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parse_for(text: &str, selected: Metric) -> Result<Self> {
+        let metrics = Self::parse(text)?;
+        metrics.validate_for(selected)?;
+        Ok(metrics)
+    }
+
+    pub(crate) fn validate_for(&self, selected: Metric) -> Result<()> {
+        let selected_value = self.value_for(selected).ok_or_else(|| {
             metric_error(format!(
-                "benchmark output is missing finite selected metric {selected}"
+                "selected metric {selected} was not emitted; available finite metrics: {}",
+                self.available_metric_names()
             ))
         })?;
         if !selected_value.is_finite() {
@@ -113,7 +149,7 @@ impl BenchmarkMetrics {
                 "selected metric {selected} must be finite"
             )));
         }
-        if let Some(failed) = metrics.failed_requests {
+        if let Some(failed) = self.failed_requests {
             if failed < 0.0 {
                 return Err(metric_error("failed requests must not be negative"));
             }
@@ -123,7 +159,7 @@ impl BenchmarkMetrics {
                 )));
             }
         }
-        Ok(metrics)
+        Ok(())
     }
 
     pub(crate) fn value_for(&self, metric: Metric) -> Option<f64> {
@@ -150,6 +186,19 @@ impl BenchmarkMetrics {
             Metric::P90E2e => self.p90_e2e_ms,
             Metric::P95E2e => self.p95_e2e_ms,
             Metric::P99E2e => self.p99_e2e_ms,
+        }
+    }
+
+    fn available_metric_names(&self) -> String {
+        let names = OPTIMIZATION_METRICS
+            .into_iter()
+            .filter(|metric| self.value_for(*metric).is_some_and(f64::is_finite))
+            .map(|metric| metric.to_string())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
         }
     }
 
@@ -334,15 +383,44 @@ mod tests {
 
     #[test]
     fn requires_a_finite_selected_metric() {
-        assert!(BenchmarkMetrics::parse("Successful requests: 1", Metric::Tps).is_err());
+        assert!(BenchmarkMetrics::parse_for("Successful requests: 1", Metric::Tps).is_err());
         assert!(
-            BenchmarkMetrics::parse("Output token throughput (tok/s): NaN", Metric::Tps,).is_err()
+            BenchmarkMetrics::parse_for("Output token throughput (tok/s): NaN", Metric::Tps,)
+                .is_err()
         );
     }
 
     #[test]
+    fn missing_objective_keeps_observations_and_lists_available_metrics() {
+        let text = "Successful requests: 50\n\
+                    Failed requests: 0\n\
+                    Request throughput (req/s): 1.25\n\
+                    Output token throughput (tok/s): 160.35\n\
+                    Mean TTFT (ms): 24.95\n\
+                    P99 TTFT (ms): 54.34\n\
+                    Mean TPOT (ms): 6.09\n\
+                    P99 TPOT (ms): 6.11\n\
+                    Mean ITL (ms): 6.09\n\
+                    P99 ITL (ms): 6.52\n";
+
+        let metrics = BenchmarkMetrics::parse(text).unwrap();
+        let error = metrics.validate_for(Metric::E2e).unwrap_err();
+
+        assert_eq!(metrics.successful_requests, Some(50.0));
+        assert_eq!(metrics.mean_ttft_ms, Some(24.95));
+        assert_eq!(metrics.mean_tpot_ms, Some(6.09));
+        assert_eq!(metrics.mean_itl_ms, Some(6.09));
+        assert!(error
+            .to_string()
+            .contains("selected metric e2e was not emitted"));
+        assert!(error.to_string().contains(
+            "available finite metrics: tps, req_s, ttft, p99_ttft, tpot, p99_tpot, itl, p99_itl"
+        ));
+    }
+
+    #[test]
     fn rejects_positive_failed_requests() {
-        let error = BenchmarkMetrics::parse(
+        let error = BenchmarkMetrics::parse_for(
             "Failed requests: 1\nOutput token throughput (tok/s): 10",
             Metric::Tps,
         )
@@ -355,12 +433,12 @@ mod tests {
     fn tolerates_self_consistent_duplicate_metrics() {
         // vLLM `bench serve` echoes the configured concurrency before the run
         // and again inside the result block; both carry the same value.
-        let metrics = BenchmarkMetrics::parse(
+        let metrics = BenchmarkMetrics::parse_for(
             "Maximum request concurrency: 1\n\
-             ============ Serving Benchmark Result ============\n\
-             Successful requests: 4\n\
-             Maximum request concurrency: 1\n\
-             Output token throughput (tok/s): 10\n",
+         ============ Serving Benchmark Result ============\n\
+         Successful requests: 4\n\
+         Maximum request concurrency: 1\n\
+         Output token throughput (tok/s): 10\n",
             Metric::Tps,
         )
         .unwrap();
@@ -371,10 +449,10 @@ mod tests {
 
     #[test]
     fn rejects_conflicting_duplicate_metrics() {
-        let error = BenchmarkMetrics::parse(
+        let error = BenchmarkMetrics::parse_for(
             "Maximum request concurrency: 1\n\
-             Maximum request concurrency: 2\n\
-             Output token throughput (tok/s): 10\n",
+         Maximum request concurrency: 2\n\
+         Output token throughput (tok/s): 10\n",
             Metric::Tps,
         )
         .unwrap_err();
@@ -389,7 +467,7 @@ mod tests {
             text.push_str(&format!("unknown-{index}: {index}\n"));
         }
 
-        let metrics = BenchmarkMetrics::parse(&text, Metric::Tps).unwrap();
+        let metrics = BenchmarkMetrics::parse_for(&text, Metric::Tps).unwrap();
 
         assert_eq!(metrics.output_token_throughput, Some(0.0));
         assert_eq!(
@@ -407,7 +485,7 @@ mod tests {
                     Namespace(model='Qwen/Qwen3-0.6B', seed=0): 1\n\
                     Peak new metric (tok/s): 5\n";
 
-        let metrics = BenchmarkMetrics::parse(text, Metric::Tps).unwrap();
+        let metrics = BenchmarkMetrics::parse_for(text, Metric::Tps).unwrap();
 
         assert_eq!(metrics.unrecognized.len(), 1, "{:?}", metrics.unrecognized);
         assert!(metrics.unrecognized.contains_key("Peak new metric (tok/s)"));

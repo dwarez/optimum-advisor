@@ -46,8 +46,9 @@ impl fmt::Display for Engine {
     }
 }
 
-/// Metric to optimize. Each value selects one field of the benchmark metrics:
-/// throughput metrics are higher-is-better, latency metrics lower-is-better.
+/// Metric to optimize. Each value selects one field only when the engine benchmark emits it:
+/// throughput metrics are higher-is-better, latency metrics lower-is-better. Availability can
+/// vary by engine image/version; Optimum Advisor never substitutes or synthesizes a metric.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
