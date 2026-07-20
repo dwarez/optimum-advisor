@@ -345,15 +345,20 @@ Point an MCP client at the binary:
 }
 ```
 
-Transport is strict newline-delimited JSON-RPC 2.0 (protocol `2025-11-25`);
+Transport is strict newline-delimited JSON-RPC 2.0 (protocol `2025-11-25`,
+negotiating down to `2025-06-18` and `2025-03-26` clients per the MCP spec);
 stdout carries protocol frames only. Tools: `inspect_hardware`,
 `inspect_engine`, `validate_config`, `estimate_memory`, `check_correctness`,
-`run_benchmark`, `evaluate_candidate`, `run_sweep`, `rank_candidates`. Schemas
-are generated from the same strict types the CLI uses; execution tools share
-the CLI's validation, cancellation, persistence, and cleanup paths and return
-bounded summaries plus durable report paths. Requests run sequentially;
+`run_benchmark`, `evaluate_candidate`, `run_sweep`, `rank_candidates`,
+`get_report`, `list_runs`. Schemas are generated from the same strict types the
+CLI uses, and JSON configs use the same shape as schema-v2 TOML files.
+Execution tools share the CLI's validation, cancellation, persistence, and
+cleanup paths and return per-trial summaries (metrics, correctness, compact
+failures) plus durable report paths; `get_report` and `list_runs` read prior
+results back without filesystem access. Requests run sequentially;
 `notifications/cancelled` cancels a queued or active request; input lines are
-capped at 1 MiB and responses at 256 KiB.
+capped at 1 MiB and responses at 256 KiB. `scripts/mcp-probe.py` is a minimal
+stdio client for inspecting the server by hand.
 
 ## Limitations
 

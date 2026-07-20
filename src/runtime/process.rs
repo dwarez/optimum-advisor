@@ -31,6 +31,10 @@ pub(crate) const SECRET_CAPTURE_BYTES: usize = 64 * 1024;
 pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DRAIN_CHUNK_BYTES: usize = 8 * 1024;
+#[cfg(target_os = "linux")]
+const EXECUTABLE_FILE_BUSY_RETRIES: usize = 10;
+#[cfg(target_os = "linux")]
+const EXECUTABLE_FILE_BUSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CapturePolicy {
@@ -367,7 +371,7 @@ impl ProcessExecutor {
             command.process_group(0);
         }
 
-        let mut child = command.spawn().map_err(|source| ProcessFailure {
+        let mut child = spawn_command(&mut command).map_err(|source| ProcessFailure {
             error: Error::new(
                 ErrorKind::ProcessSpawn,
                 spec.stage,
@@ -436,6 +440,29 @@ impl ProcessExecutor {
                     .with_container(container.name.clone())
                     .payload()
             })
+    }
+}
+
+fn spawn_command(command: &mut Command) -> std::io::Result<Child> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut retries = 0;
+        loop {
+            match command.spawn() {
+                Err(error)
+                    if error.raw_os_error() == Some(nix::libc::ETXTBSY)
+                        && retries < EXECUTABLE_FILE_BUSY_RETRIES =>
+                {
+                    retries += 1;
+                    thread::sleep(EXECUTABLE_FILE_BUSY_RETRY_DELAY);
+                }
+                result => return result,
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        command.spawn()
     }
 }
 
@@ -1009,6 +1036,36 @@ mod tests {
             b"warning"
         );
         assert!(!capture.stdout.truncated);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retries_transient_executable_file_busy_errors() {
+        let directory = tempdir().unwrap();
+        let program = directory.path().join("busy");
+        fs::write(&program, "#!/bin/sh\nprintf recovered\n").unwrap();
+        let mut permissions = fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&program, permissions).unwrap();
+
+        let writer = fs::OpenOptions::new().write(true).open(&program).unwrap();
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            drop(writer);
+        });
+
+        let outcome = ProcessExecutor::default()
+            .execute(
+                &ProcessSpec::new(program, std::iter::empty::<&str>()),
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        releaser.join().unwrap();
+
+        let ProcessCapture::Artifacts(capture) = outcome.capture else {
+            panic!("expected artifact capture")
+        };
+        assert_eq!(capture.stdout.tail, "recovered");
     }
 
     #[test]

@@ -21,6 +21,13 @@ use crate::{
 };
 
 pub(super) fn normalize(input: ConfigInput) -> Result<NormalizedConfig> {
+    if let Some(version) = input.schema_version {
+        if version != 2 {
+            return Err(Error::validation(format!(
+                "unsupported schema_version {version}; expected 2"
+            )));
+        }
+    }
     let engine = input
         .engine
         .ok_or_else(|| Error::validation("engine is required after configuration merge"))?;

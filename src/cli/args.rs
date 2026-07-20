@@ -515,6 +515,7 @@ impl ConfigOverrides {
         dynamic.sort_by(|left, right| left.name.cmp(&right.name));
 
         Ok(ConfigInput {
+            schema_version: None,
             engine: self.engine,
             image: self.image,
             model: self.model,
