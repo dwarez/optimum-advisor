@@ -206,6 +206,14 @@ cap concurrency without permitting GPU oversubscription. Each active trial
 gets a distinct host port. HF Jobs and `--in-container` sweeps stay sequential
 because one job/container owns one engine process namespace.
 
+Parallelism is primarily a search-throughput optimization, not measurement
+isolation. Active trials receive disjoint GPUs, but their engine processes
+still share host resources such as CPU, memory, storage and cache I/O,
+networking, PCIe bandwidth, and power or thermal headroom. Contention can
+shift benchmark metrics and usually prevents perfectly linear wall-time
+speedups. When candidates rank closely, rerun the finalists with
+`max_parallel_trials = 1` before treating the ranking as conclusive.
+
 Runnable examples live in [`examples/`](examples/).
 
 ## Running benchmarks

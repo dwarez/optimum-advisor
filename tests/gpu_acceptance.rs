@@ -1,7 +1,9 @@
 #![cfg(unix)]
 
 use std::{
-    env, fs,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     thread,
@@ -14,6 +16,32 @@ use nix::{
 };
 use serde_json::Value;
 use tempfile::TempDir;
+
+#[test]
+fn acceptance_path_resolves_repo_correctness_tool_without_activation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TempDir::new().unwrap();
+    let bin = repo.path().join(".venv/bin");
+    fs::create_dir_all(&bin).unwrap();
+    let lighteval = bin.join("lighteval");
+    fs::write(&lighteval, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut permissions = fs::metadata(&lighteval).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&lighteval, permissions).unwrap();
+
+    let inherited = repo.path().join("inherited");
+    fs::create_dir(&inherited).unwrap();
+    let output = Command::new("lighteval")
+        .env(
+            "PATH",
+            acceptance_path_with(repo.path(), Some(inherited.as_os_str())),
+        )
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+}
 
 #[test]
 fn acceptance_config_tests_execution_without_a_model_quality_gate() {
@@ -65,6 +93,7 @@ fn production_gpu_host_acceptance() {
         env::var("OPTIMUM_ADVISOR_GPU_ACCEPTANCE_ENGINE").unwrap_or_else(|_| "vllm".to_string());
     assert!(matches!(engine.as_str(), "vllm" | "sglang"));
     let image = env::var("OPTIMUM_ADVISOR_GPU_ACCEPTANCE_IMAGE").ok();
+    assert_correctness_environment();
     let workspace = TempDir::new().unwrap();
     let hf_cache = workspace.path().join("huggingface");
     let hf_hub_cache = hf_cache.join("hub");
@@ -251,7 +280,41 @@ fn assert_parallel_sweep_acceptance(
 }
 
 fn command() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_optimum-advisor"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_optimum-advisor"));
+    command.env("PATH", acceptance_path());
+    command
+}
+
+fn acceptance_path() -> OsString {
+    acceptance_path_with(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+        env::var_os("PATH").as_deref(),
+    )
+}
+
+fn acceptance_path_with(repo: &Path, inherited: Option<&OsStr>) -> OsString {
+    let mut paths = vec![repo.join(".venv/bin")];
+    if let Some(inherited) = inherited {
+        paths.extend(env::split_paths(inherited));
+    }
+    env::join_paths(paths).expect("acceptance PATH entries must not contain path separators")
+}
+
+fn assert_correctness_environment() {
+    let path = acceptance_path();
+    let available = env::split_paths(&path)
+        .map(|directory| directory.join("lighteval"))
+        .any(|candidate| {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::metadata(candidate).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        });
+    assert!(
+        available,
+        "lighteval is unavailable; run ./scripts/setup-correctness-env.sh"
+    );
 }
 
 fn run(arguments: &[&str]) -> Output {
