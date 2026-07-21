@@ -244,6 +244,8 @@ pub(super) struct EvaluationSummary {
     run_id: String,
     kind: RunKind,
     state: RunState,
+    /// Resolved optimization objective used to rank `winning_value` fields.
+    winning_metric: Metric,
     trial_count: usize,
     succeeded: usize,
     failed: usize,
@@ -638,6 +640,7 @@ fn evaluation_summary(
         run_id: result.report.run_id,
         kind: result.report.kind,
         state: result.report.state,
+        winning_metric: metric,
         trial_count: result.report.trials.len(),
         succeeded,
         failed: result.report.trials.len() - succeeded,
@@ -785,6 +788,7 @@ fn report_view_summary(view: ReportView, report_path: PathBuf) -> EvaluationSumm
         run_id: view.run_id,
         kind: view.kind,
         state: view.state,
+        winning_metric: metric,
         trial_count,
         succeeded,
         failed: trial_count - succeeded,
@@ -1243,6 +1247,30 @@ mod tests {
     }
 
     #[test]
+    fn execution_schema_explains_managed_arguments_and_metric_availability() {
+        let tools = tool_definitions().unwrap();
+        let benchmark = tools
+            .iter()
+            .find(|tool| tool["name"] == "run_benchmark")
+            .unwrap();
+        let schema = serde_json::to_string(&benchmark["inputSchema"]).unwrap();
+
+        for guidance in [
+            "candidate.max_running_requests",
+            "runtime.max_model_len",
+            "candidate.memory_fraction",
+            "only when the engine benchmark emits it",
+            "at most 3B",
+        ] {
+            assert!(schema.contains(guidance), "missing {guidance:?}: {schema}");
+        }
+        assert!(benchmark["description"]
+            .as_str()
+            .unwrap()
+            .contains("parsed metrics remain available"));
+    }
+
+    #[test]
     fn typed_tool_inputs_reject_unknown_fields() {
         let error = call_tool(
             "rank_candidates",
@@ -1361,6 +1389,7 @@ mod tests {
         assert_eq!(call.value["run_id"], "run-1");
         assert_eq!(call.value["trial_count"], 2);
         assert_eq!(call.value["succeeded"], 1);
+        assert_eq!(call.value["winning_metric"], "tps");
         let trials = call.value["trials"].as_array().unwrap();
         assert_eq!(trials.len(), 2);
         assert_eq!(trials[0]["status"], "success");

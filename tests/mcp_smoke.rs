@@ -3,6 +3,7 @@
 use std::{
     fs,
     io::{BufRead, BufReader, Write},
+    net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::Path,
     process::{Child, Command, Stdio},
@@ -122,6 +123,105 @@ fn cancellation_keeps_the_binary_server_ready() {
     assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
 }
 
+#[test]
+fn server_startup_failure_returns_an_error_and_keeps_mcp_ready() {
+    let fixture = McpFixture::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut child = fixture.failing_server_command();
+    let mut stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    assert_eq!(response(&receiver)["id"], 1);
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":2,
+            "method":"tools/call",
+            "params":{
+                "name":"run_benchmark",
+                "arguments":{
+                    "results_dir":fixture.directory.path().join("results"),
+                    "config":{
+                        "engine":"vllm",
+                        "image":"repo/image:tag",
+                        "model":"repo/model",
+                        "metric":"tps",
+                        "runtime":{
+                            "port":port,
+                            "startup_timeout_secs":5,
+                            "benchmark_timeout_secs":5
+                        },
+                        "benchmark":{"num_prompts":1},
+                        "correctness":{"enabled":false},
+                        "model_memory":{"enabled":false}
+                    }
+                }
+            }
+        }),
+    );
+
+    let failed = response(&receiver);
+    assert_eq!(failed["id"], 2);
+    assert_eq!(failed["result"]["isError"], true);
+    let error = &failed["result"]["structuredContent"];
+    assert_eq!(error["kind"], "benchmark", "{failed}");
+    assert_eq!(error["stage"], "benchmark");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("fatal server configuration"));
+    let report_path = error["report_path"].as_str().unwrap();
+    let report: Value = serde_json::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
+    assert_eq!(report["state"], "failed");
+    assert_eq!(report["trials"][0]["failure"]["stage"], "server");
+    assert!(report["trials"][0]["failure"]["stderr_tail"]
+        .as_str()
+        .unwrap()
+        .contains("fatal server configuration"));
+
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc":"2.0",
+            "id":3,
+            "method":"tools/call",
+            "params":{
+                "name":"rank_candidates",
+                "arguments":{
+                    "metric":"tps",
+                    "candidates":[{"id":"candidate","value":1.0}]
+                }
+            }
+        }),
+    );
+    assert_eq!(response(&receiver)["result"]["isError"], false);
+
+    drop(stdin);
+    assert!(wait_for_exit(&mut child).success());
+    reader.join().unwrap();
+    let stderr = child.wait_with_output().unwrap().stderr;
+    assert!(stderr.is_empty(), "{}", String::from_utf8_lossy(&stderr));
+}
+
 struct McpFixture {
     directory: TempDir,
     started: std::path::PathBuf,
@@ -145,11 +245,19 @@ fi
 if [ "${1:-}" = "run" ]; then
     case "$*" in
         *make_arg_parser*|*ServerArgs.add_cli_args*)
+            if [ "${MCP_FAIL_SERVER:-0}" = "1" ]; then
+                printf '%s\n' '--reasoning-parser	value' '--trust-remote-code	flag'
+                exit 0
+            fi
             printf '%s\n' started > "$MCP_INTROSPECTION_STARTED"
             trap 'exit 130' TERM INT
             while :; do sleep 1; done
             ;;
     esac
+    if [ "${MCP_FAIL_SERVER:-0}" = "1" ]; then
+        printf '%s\n' 'fatal server configuration' >&2
+        exit 17
+    fi
 fi
 echo "unexpected docker command: $*" >&2
 exit 64
@@ -157,23 +265,41 @@ exit 64
         )
         .unwrap();
         fs::set_permissions(&docker, fs::Permissions::from_mode(0o700)).unwrap();
+        let nvidia_smi = bin.join("nvidia-smi");
+        fs::write(
+            &nvidia_smi,
+            "#!/bin/sh\nprintf '%s\\n' '0, Test GPU, GPU-test, 9.0, 24576, 24000, 576'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&nvidia_smi, fs::Permissions::from_mode(0o700)).unwrap();
         Self { directory, started }
     }
 
+    fn failing_server_command(&self) -> Child {
+        self.command_with_server_failure(true)
+    }
+
     fn command(&self) -> Child {
+        self.command_with_server_failure(false)
+    }
+
+    fn command_with_server_failure(&self, fail_server: bool) -> Child {
         let mut path = self.directory.path().join("bin").into_os_string();
         path.push(":");
         path.push(std::env::var_os("PATH").unwrap_or_default());
-        Command::new(env!("CARGO_BIN_EXE_optimum-advisor"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_optimum-advisor"));
+        command
             .arg("mcp")
             .env("PATH", path)
             .env("MCP_INTROSPECTION_STARTED", &self.started)
             .current_dir(self.directory.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap()
+            .stderr(Stdio::piped());
+        if fail_server {
+            command.env("MCP_FAIL_SERVER", "1");
+        }
+        command.spawn().unwrap()
     }
 }
 

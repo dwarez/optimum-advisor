@@ -703,7 +703,7 @@ mod tests {
         TrialOutcome::Success {
             index,
             config: executable_config(),
-            metrics: BenchmarkMetrics::parse(
+            metrics: BenchmarkMetrics::parse_for(
                 &format!("Output token throughput (tok/s): {value}"),
                 Metric::Tps,
             )
@@ -733,7 +733,7 @@ mod tests {
                 stderr_tail: None,
             },
             metrics: Some(
-                BenchmarkMetrics::parse(
+                BenchmarkMetrics::parse_for(
                     &format!("Output token throughput (tok/s): {value}"),
                     Metric::Tps,
                 )

@@ -9,7 +9,10 @@ use crate::{
     error::{Error, ErrorKind, ExecutionStage, Result},
     runtime::{
         cancel::CancellationToken,
-        process::{ManagedProcess, ProcessExecutor, ProcessFailure, ProcessOutcome, ProcessSpec},
+        process::{
+            ManagedProcess, ProcessCapture, ProcessExecutor, ProcessFailure, ProcessOutcome,
+            ProcessSpec,
+        },
     },
 };
 
@@ -55,7 +58,7 @@ impl ReadinessProbe {
 }
 
 pub(crate) struct ManagedServer<'a> {
-    process: Option<ManagedProcess<'a>>,
+    process: ManagedProcess<'a>,
     readiness: ReadinessProbe,
 }
 
@@ -81,66 +84,85 @@ impl<'a> ManagedServer<'a> {
             });
         }
         let process = executor.spawn(spec, cancellation)?;
-        Ok(Self {
-            process: Some(process),
-            readiness,
-        })
+        Ok(Self { process, readiness })
     }
 
-    pub(crate) fn wait_ready(&mut self, cancellation: &CancellationToken) -> Result<()> {
+    pub(crate) fn wait_ready(
+        mut self,
+        cancellation: &CancellationToken,
+    ) -> std::result::Result<Self, ProcessFailure> {
         loop {
             if cancellation.is_cancelled() {
-                return Err(Error::interrupted(ExecutionStage::Server));
+                return Err(terminated_failure(
+                    self.process.terminate(),
+                    Error::interrupted(ExecutionStage::Server),
+                ));
             }
-            let process = self
-                .process
-                .as_mut()
-                .expect("managed server exists until shutdown");
-            if process.try_wait()?.is_some() {
-                let shutdown = self
-                    .process
-                    .take()
-                    .expect("managed server exists until shutdown")
-                    .terminate();
-                return match shutdown {
-                    Ok(_) => Err(Error::new(
-                        ErrorKind::ProcessExit,
-                        Some(ExecutionStage::Server),
-                        "server exited before becoming ready",
-                    )),
-                    Err(failure) => Err(failure.error),
-                };
+            let status = match self.process.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    return Err(terminated_failure(self.process.terminate(), error));
+                }
+            };
+            if let Some(status) = status {
+                let mut error = Error::new(
+                    ErrorKind::ProcessExit,
+                    Some(ExecutionStage::Server),
+                    "server exited before becoming ready",
+                );
+                if let Some(code) = status.code() {
+                    error = error.with_child_exit_code(code);
+                }
+                return Err(terminated_failure(self.process.terminate(), error));
             }
             if readiness_satisfied(&self.readiness) {
-                return Ok(());
+                return Ok(self);
             }
             if Instant::now() >= self.readiness.deadline {
-                return Err(Error::new(
+                let error = Error::new(
                     ErrorKind::Timeout,
                     Some(ExecutionStage::Server),
                     format!(
                         "server did not become ready at {} before the startup deadline",
                         self.readiness.address
                     ),
-                ));
+                );
+                return Err(terminated_failure(self.process.terminate(), error));
             }
             thread::sleep(READINESS_POLL_INTERVAL);
         }
     }
 
     pub(crate) fn is_running(&mut self) -> Result<bool> {
-        self.process
-            .as_mut()
-            .expect("managed server exists until shutdown")
-            .try_wait()
-            .map(|status| status.is_none())
+        self.process.try_wait().map(|status| status.is_none())
     }
 
-    pub(crate) fn stop(mut self) -> std::result::Result<ProcessOutcome, ProcessFailure> {
-        self.process
-            .take()
-            .expect("managed server exists until shutdown")
-            .terminate()
+    pub(crate) fn stop(self) -> std::result::Result<ProcessOutcome, ProcessFailure> {
+        self.process.terminate()
+    }
+}
+
+fn terminated_failure(
+    result: std::result::Result<ProcessOutcome, ProcessFailure>,
+    error: Error,
+) -> ProcessFailure {
+    match result {
+        Ok(outcome) => {
+            let capture = match outcome.capture {
+                ProcessCapture::Artifacts(capture) => Some(Box::new(capture)),
+                ProcessCapture::Secret(_) => None,
+            };
+            ProcessFailure {
+                error,
+                capture,
+                cleanup_failure: outcome.cleanup_failure.map(Box::new),
+            }
+        }
+        Err(failure) => ProcessFailure {
+            error: error.with_source(failure.error),
+            capture: failure.capture,
+            cleanup_failure: failure.cleanup_failure,
+        },
     }
 }
 
@@ -185,13 +207,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         drop(listener);
-        let spec = ProcessSpec::new("sh", ["-c", "exit 0"])
+        let spec = ProcessSpec::new("sh", ["-c", "printf 'startup failed' >&2; exit 7"])
             .with_stage(ExecutionStage::Server)
             .with_timeout(Duration::from_secs(5));
         let executor = ProcessExecutor::default();
         let cancellation = CancellationToken::new();
         let started = Instant::now();
-        let mut server = ManagedServer::start(
+        let server = ManagedServer::start(
             &executor,
             &spec,
             ReadinessProbe::new(
@@ -204,9 +226,14 @@ mod tests {
         )
         .unwrap();
 
-        let error = server.wait_ready(&cancellation).unwrap_err();
+        let error = server
+            .wait_ready(&cancellation)
+            .err()
+            .expect("server exit must fail readiness");
 
-        assert_eq!(error.kind(), ErrorKind::ProcessExit);
+        assert_eq!(error.error.kind(), ErrorKind::ProcessExit);
+        assert_eq!(error.error.context.child_exit_code, Some(7));
+        assert_eq!(error.diagnostic_tail(), Some("startup failed"));
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 
@@ -230,7 +257,7 @@ mod tests {
             .with_timeout(Duration::from_secs(10));
         let executor = ProcessExecutor::default();
         let cancellation = CancellationToken::new();
-        let mut server = ManagedServer::start(
+        let server = ManagedServer::start(
             &executor,
             &spec,
             ReadinessProbe::new(address.ip(), address.port(), None, Duration::from_secs(2)),
@@ -238,7 +265,7 @@ mod tests {
         )
         .unwrap();
 
-        server.wait_ready(&cancellation).unwrap();
+        let mut server = server.wait_ready(&cancellation).unwrap();
         assert!(server.is_running().unwrap());
         server.stop().unwrap();
         stop_sender.send(()).unwrap();

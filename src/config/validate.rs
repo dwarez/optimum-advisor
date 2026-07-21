@@ -31,8 +31,8 @@ pub(super) fn normalize(input: ConfigInput) -> Result<NormalizedConfig> {
     let engine = input
         .engine
         .ok_or_else(|| Error::validation("engine is required after configuration merge"))?;
-    let metric = input.metric.unwrap_or(Metric::Tps);
     let model = required_trimmed(input.model, "model")?;
+    let metric = input.metric.unwrap_or_else(|| default_metric(&model));
     let image = match input.image {
         Some(image) => required_trimmed(Some(image), "image")?,
         None => engine.default_image().to_string(),
@@ -301,6 +301,43 @@ fn normalize_gpu_devices(devices: Option<Vec<String>>, gpus: usize) -> Result<Ve
     Ok(normalized)
 }
 
+fn default_metric(model: &str) -> Metric {
+    const MAX_LATENCY_DEFAULT_BILLIONS: f64 = 3.0;
+
+    let parameter_billions = model
+        .split(['/', '-'])
+        .filter_map(parameter_count_billions)
+        .next_back();
+    if parameter_billions.is_some_and(|size| size <= MAX_LATENCY_DEFAULT_BILLIONS) {
+        Metric::Tpot
+    } else {
+        Metric::Tps
+    }
+}
+
+fn parameter_count_billions(segment: &str) -> Option<f64> {
+    let (number, scale) = if let Some(number) = segment
+        .strip_suffix('B')
+        .or_else(|| segment.strip_suffix('b'))
+    {
+        (number, 1.0)
+    } else {
+        let number = segment
+            .strip_suffix('M')
+            .or_else(|| segment.strip_suffix('m'))?;
+        (number, 0.001)
+    };
+    let decimal;
+    let number = if number.contains('_') {
+        decimal = number.replace('_', ".");
+        decimal.as_str()
+    } else {
+        number
+    };
+    let value = number.parse::<f64>().ok()? * scale;
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
 fn normalize_request_rate(value: String) -> Result<String> {
     let value = value.trim();
     if value == "inf" {
@@ -345,6 +382,48 @@ mod tests {
     use crate::domain::candidate::{CandidateOverrides, DynamicArg};
 
     #[test]
+    fn tiny_model_defaults_to_decode_latency_metric() {
+        let normalized = ConfigInput::minimal(Engine::Vllm, "Qwen/Qwen3-0.6B")
+            .normalize()
+            .unwrap();
+
+        assert_eq!(normalized.metric, Metric::Tpot);
+    }
+
+    #[test]
+    fn common_sub_three_billion_notations_default_to_decode_latency() {
+        for model in [
+            "HuggingFaceTB/SmolLM2-135M-Instruct",
+            "stabilityai/stablelm-2-1_6b",
+        ] {
+            let normalized = ConfigInput::minimal(Engine::Vllm, model)
+                .normalize()
+                .unwrap();
+
+            assert_eq!(normalized.metric, Metric::Tpot, "{model}");
+        }
+    }
+
+    #[test]
+    fn larger_or_unversioned_model_defaults_to_throughput_metric() {
+        for model in ["Qwen/Qwen3-4B-Instruct-2507", "repo/model"] {
+            let normalized = ConfigInput::minimal(Engine::Vllm, model)
+                .normalize()
+                .unwrap();
+
+            assert_eq!(normalized.metric, Metric::Tps, "{model}");
+        }
+    }
+
+    #[test]
+    fn explicit_metric_overrides_model_aware_default() {
+        let mut input = ConfigInput::minimal(Engine::Vllm, "Qwen/Qwen3-0.6B");
+        input.metric = Some(Metric::ReqS);
+
+        assert_eq!(input.normalize().unwrap().metric, Metric::ReqS);
+    }
+
+    #[test]
     fn explicit_candidate_values_survive_engine_defaults() {
         let mut input = ConfigInput::minimal(Engine::Sglang, "m");
         input.candidate = CandidateOverrides {
@@ -378,6 +457,27 @@ mod tests {
         let error = input.normalize().unwrap_err();
 
         assert!(error.to_string().contains("owned"));
+    }
+
+    #[test]
+    fn owned_dynamic_arguments_name_the_canonical_config_field() {
+        for (name, replacement) in [
+            ("max-num-seqs", "candidate.max_running_requests"),
+            ("max-model-len", "runtime.max_model_len"),
+            ("gpu-memory-utilization", "candidate.memory_fraction"),
+        ] {
+            let mut input = ConfigInput::minimal(Engine::Vllm, "m");
+            input.serve_args = vec![DynamicArg::value(name, "1")];
+
+            let error = input.normalize().unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("set {replacement} instead")),
+                "{error}"
+            );
+        }
     }
 
     #[test]

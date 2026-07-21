@@ -272,14 +272,16 @@ fn run_serve(invocation: Invocation, out: &mut impl Write) -> Result<()> {
     create_private_dir(&artifacts)?;
     let mut plan = managed_run_plan(&config, "serve", &artifacts, invocation.backend)?;
     attach_hf_token(&mut plan, token.as_ref(), invocation.backend);
-    let mut server = ManagedServer::start(
+    let server = ManagedServer::start(
         &executor,
         &plan.server,
         plan.readiness.clone(),
         &cancellation,
     )
     .map_err(|failure| failure.error)?;
-    server.wait_ready(&cancellation)?;
+    let mut server = server
+        .wait_ready(&cancellation)
+        .map_err(|failure| failure.error)?;
     writeln_checked(out, "server: ready")?;
     loop {
         if cancellation.is_cancelled() {
@@ -979,7 +981,18 @@ fn execute_trial_steps(
     attach_hf_token(&mut plan, hf_token, backend);
     let mut server =
         match ManagedServer::start(executor, &plan.server, plan.readiness.clone(), cancellation) {
-            Ok(server) => Some(server),
+            Ok(server) => match server.wait_ready(cancellation) {
+                Ok(server) => Some(server),
+                Err(process_failure) => {
+                    failure = Some(capture_process_failure(
+                        process_failure,
+                        &plan.server,
+                        run_dir,
+                        &mut truncated,
+                    ));
+                    None
+                }
+            },
             Err(process_failure) => {
                 failure = Some(capture_process_failure(
                     process_failure,
@@ -990,12 +1003,6 @@ fn execute_trial_steps(
                 None
             }
         };
-
-    if let Some(active) = server.as_mut() {
-        if let Err(error) = active.wait_ready(cancellation) {
-            failure = Some(error_trial_failure(error));
-        }
-    }
 
     if failure.is_none() && config.correctness.enabled {
         let directory = trial_dir.join("correctness");
@@ -1061,8 +1068,13 @@ fn execute_trial_steps(
         match executor.execute(&plan.benchmark, cancellation) {
             Ok(outcome) => {
                 match capture_process_outcome(outcome, &plan.benchmark, run_dir, &mut truncated) {
-                    Ok(_) => match read_benchmark_metrics(&plan.benchmark, config.metric) {
-                        Ok(parsed) => metrics = Some(parsed),
+                    Ok(_) => match read_benchmark_metrics(&plan.benchmark) {
+                        Ok(parsed) => {
+                            if let Err(error) = parsed.validate_for(config.metric) {
+                                failure = Some(error_trial_failure(error));
+                            }
+                            metrics = Some(parsed);
+                        }
                         Err(error) => failure = Some(error_trial_failure(error)),
                     },
                     Err(problem) => failure = Some(problem),
@@ -1201,10 +1213,7 @@ fn finish_trial(
     })
 }
 
-fn read_benchmark_metrics(
-    spec: &ProcessSpec,
-    metric: crate::domain::engine::Metric,
-) -> Result<BenchmarkMetrics> {
+fn read_benchmark_metrics(spec: &ProcessSpec) -> Result<BenchmarkMetrics> {
     let path = spec.stdout_artifact.as_deref().ok_or_else(|| {
         Error::new(
             ErrorKind::Io,
@@ -1221,7 +1230,7 @@ fn read_benchmark_metrics(
         .with_artifact_path(path)
         .with_source(source)
     })?;
-    BenchmarkMetrics::parse(&text, metric)
+    BenchmarkMetrics::parse(&text)
 }
 
 fn attach_hf_token(plan: &mut ManagedRunPlan, token: Option<&Secret>, backend: ExecutionBackend) {

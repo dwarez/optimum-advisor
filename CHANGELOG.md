@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- model-aware metric defaults: `tpot` for model IDs up to 3B and `tps` otherwise
+- actionable MCP schema guidance for normalized serving fields
+
+### Fixed
+
+- preserve parsed benchmark metrics when the selected objective is unavailable
+  and report the finite objectives emitted by the engine
+- return captured server-startup failures through MCP instead of terminating the
+  MCP process and leaving reports in `running`
+
 ## [0.1.5](https://github.com/dwarez/optimum-advisor/compare/v0.1.4...v0.1.5) - 2026-07-16
 
 ### Added
