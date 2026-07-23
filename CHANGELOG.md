@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.6](https://github.com/dwarez/optimum-advisor/compare/v0.1.5...v0.1.6) - 2026-07-21
+
+### Added
+
+- improving mcp server capabilities for true agentic usage ([#34](https://github.com/dwarez/optimum-advisor/pull/34))
+- improved and tested mcp server ([#31](https://github.com/dwarez/optimum-advisor/pull/31))
+
+### Documentation
+
+- readme and contributing ([#30](https://github.com/dwarez/optimum-advisor/pull/30))
+
 ### Added
 
 - model-aware metric defaults: `tpot` for model IDs up to 3B and `tps` otherwise
