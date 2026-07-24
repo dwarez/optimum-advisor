@@ -84,12 +84,21 @@ pub(crate) fn submit(
         }
         RunKind::Sweep => None,
     };
+    let forwarded_parallelism = (kind == RunKind::Sweep)
+        .then(|| {
+            normalized
+                .sweep
+                .as_ref()
+                .and_then(|sweep| sweep.max_parallel_trials)
+        })
+        .flatten();
     let persist_to_bucket = settings.results_bucket.is_some();
     let bootstrap = build_bootstrap(
         &settings.binary_url,
         &config_b64,
         subcommand,
         forwarded_image,
+        forwarded_parallelism,
         normalized.correctness.enabled,
         persist_to_bucket,
     );
@@ -155,6 +164,7 @@ fn build_bootstrap(
     config_b64: &str,
     subcommand: &str,
     forwarded_image: Option<&str>,
+    max_parallel_trials: Option<usize>,
     correctness: bool,
     persist_to_bucket: bool,
 ) -> String {
@@ -195,11 +205,14 @@ fn build_bootstrap(
     let image_argument = forwarded_image
         .map(|image| format!(" --image {image}"))
         .unwrap_or_default();
+    let parallel_argument = max_parallel_trials
+        .map(|cap| format!(" --max-parallel-trials {cap}"))
+        .unwrap_or_default();
     // Capture the exit code instead of aborting so results are transferred and
     // failed-trial evidence survives; the job still exits with the real status.
     script.push_str("rc=0\n");
     script.push_str(&format!(
-        "{BINARY_PATH} {subcommand} --in-container --config {CONFIG_PATH} --results-dir {LOCAL_RESULTS}{image_argument} || rc=$?\n"
+        "{BINARY_PATH} {subcommand} --in-container --config {CONFIG_PATH} --results-dir {LOCAL_RESULTS}{image_argument}{parallel_argument} || rc=$?\n"
     ));
     if persist_to_bucket {
         // One bulk copy at the end; plain writes only, no rename/fsync games
@@ -340,6 +353,7 @@ mod tests {
             "Zm9v",
             "bench",
             Some("repo/custom:1"),
+            None,
             true,
             true,
         );
@@ -363,11 +377,12 @@ mod tests {
         assert!(bucket.contains("exit \"$rc\""));
         assert!(!bucket.contains("find "));
 
-        let logs = build_bootstrap("https://x/oa", "Zm9v", "sweep", None, false, false);
+        let logs = build_bootstrap("https://x/oa", "Zm9v", "sweep", None, Some(2), false, false);
         assert!(!logs.contains("uv venv"));
         assert!(!logs.contains("lighteval"));
         assert!(!logs.contains("--image"));
         assert!(logs.contains("sweep --in-container"));
+        assert!(logs.contains("--max-parallel-trials 2"));
         assert!(logs.contains("find /tmp/optimum-advisor-results -name report.json -exec cat"));
         assert!(!logs.contains("cp -r"));
         assert!(logs.contains("exit \"$rc\""));

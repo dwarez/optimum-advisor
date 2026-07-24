@@ -44,6 +44,7 @@ pub(crate) struct ConfigFile {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct SweepInput {
     pub max_trials: Option<usize>,
+    pub max_parallel_trials: Option<usize>,
     pub tensor_parallelism: Option<Vec<usize>>,
     pub memory_fraction: Option<Vec<f64>>,
     pub prefill_token_budget: Option<Vec<u32>>,
@@ -135,6 +136,7 @@ fn parse_sweep(input: SweepInput) -> Result<SweepSpec> {
     }
     Ok(SweepSpec {
         max_trials: input.max_trials.unwrap_or(256),
+        max_parallel_trials: input.max_parallel_trials,
         tensor_parallelism: input.tensor_parallelism,
         memory_fraction: input.memory_fraction,
         prefill_token_budget: input.prefill_token_budget,
@@ -196,5 +198,16 @@ mod tests {
 
         assert!(file.engine.is_none());
         assert!(file.model.is_none());
+    }
+
+    #[test]
+    fn parses_sweep_parallelism_cap() {
+        let file = parse_config_text(
+            "schema_version=2\nengine='vllm'\nmodel='m'\n[sweep]\nmax_parallel_trials=3",
+        )
+        .unwrap();
+        let input = ConfigInput::try_from(file).unwrap();
+
+        assert_eq!(input.sweep.unwrap().max_parallel_trials, Some(3));
     }
 }

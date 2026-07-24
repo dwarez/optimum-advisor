@@ -10,6 +10,7 @@ mod leaderboard;
 mod mcp;
 mod results;
 mod runtime;
+mod sweep;
 mod terminal;
 
 use std::{env, io, process::ExitCode};

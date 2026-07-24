@@ -1,9 +1,13 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     io::Write,
+    net::{IpAddr, TcpListener},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -17,7 +21,7 @@ use crate::{
     domain::{
         candidate::CandidateSpec,
         engine::Engine,
-        run::{ExecutionBackend, ExecutionTarget, PullPolicy, ResolvedImage},
+        run::{ExecutionBackend, ExecutionTarget, HardwareProfile, PullPolicy, ResolvedImage},
     },
     engines::managed::{managed_run_plan, safe_display, ManagedRunPlan},
     error::{Error, ErrorKind, ErrorPayload, ExecutionStage, Result},
@@ -38,7 +42,7 @@ use crate::{
         metrics::BenchmarkMetrics,
         report::{
             install_best_config, ModelMemoryOutcome, ReportRequest, RunKind, RunReport, RunState,
-            SubmissionResult, SubmissionState, TrialFailure, TrialOutcome,
+            SubmissionResult, SubmissionState, TrialFailure, TrialOutcome, WarningRecord,
         },
     },
     runtime::{
@@ -55,6 +59,7 @@ use crate::{
         },
         server::ManagedServer,
     },
+    sweep::{LeaseScheduler, TrialAllocation, TrialDemand},
 };
 
 const LEADERBOARD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -349,37 +354,57 @@ pub(crate) fn run_evaluation_with_cancellation(
             return Err(error.with_report_path(&report_path));
         }
     };
-    report.set_preflight(identity.resolved(), hardware)?;
-    report.checkpoint(&report_path)?;
-
-    for (index, (config, model_memory)) in configs.into_iter().zip(memory).enumerate() {
-        if cancellation.is_cancelled() {
-            let error = Error::interrupted(ExecutionStage::Benchmark);
-            finish_failed_report(&mut report, &report_path, &error, cancellation)?;
-            return Err(error.with_report_path(&report_path));
-        }
-        writeln_checked(
-            progress,
-            &format!("trial: {}/{}", index + 1, dry_configs.len()),
-        )?;
-        let trial = match execute_trial(
-            index,
-            config,
-            model_memory,
-            &run_dir,
-            &executor,
-            credentials.hf_token.as_ref(),
-            cancellation,
+    let execution_result = (|| -> Result<()> {
+        report.set_preflight(identity.resolved(), hardware.clone())?;
+        if let Some(warning) = scheduler_fallback_warning(
+            kind,
             invocation.backend,
+            normalized
+                .sweep
+                .as_ref()
+                .and_then(|sweep| sweep.max_parallel_trials),
         ) {
-            Ok(trial) => trial,
-            Err(error) => {
-                finish_failed_report(&mut report, &report_path, &error, cancellation)?;
-                return Err(error.with_report_path(&report_path));
+            report.push_warning(warning)?;
+        }
+        if kind == RunKind::Sweep && invocation.backend == ExecutionBackend::Docker {
+            let (scheduler, warning) = prepare_sweep_scheduler(&normalized, &hardware, &configs)?;
+            if let Some(warning) = warning {
+                report.push_warning(warning)?;
             }
-        };
-        report.push_trial(trial)?;
-        report.checkpoint(&report_path)?;
+            report.checkpoint(&report_path)?;
+            execute_parallel_sweep(
+                configs,
+                memory,
+                scheduler,
+                &run_dir,
+                &report_path,
+                &executor,
+                credentials.hf_token.as_ref(),
+                cancellation,
+                invocation.backend,
+                &mut report,
+                progress,
+            )
+        } else {
+            report.checkpoint(&report_path)?;
+            execute_sequential_trials(
+                configs,
+                memory,
+                dry_configs.len(),
+                &run_dir,
+                &report_path,
+                &executor,
+                credentials.hf_token.as_ref(),
+                cancellation,
+                invocation.backend,
+                &mut report,
+                progress,
+            )
+        }
+    })();
+    if let Err(error) = execution_result {
+        finish_failed_report(&mut report, &report_path, &error, cancellation)?;
+        return Err(error.with_report_path(&report_path));
     }
 
     if cancellation.is_cancelled() {
@@ -541,6 +566,7 @@ pub(crate) fn run_correctness_check_with_cancellation(
             config,
             model_memory: memory.remove(0),
             run_benchmark: false,
+            port_reservation: None,
         },
         &run.run_dir,
         &executor,
@@ -884,6 +910,7 @@ struct TrialExecutionInput {
     config: ExecutableConfig,
     model_memory: ModelMemoryOutcome,
     run_benchmark: bool,
+    port_reservation: Option<HostPortReservation>,
 }
 
 struct TrialExecution {
@@ -896,19 +923,486 @@ struct TrialExecution {
     correctness: Option<CorrectnessResult>,
 }
 
+fn config_for_allocation(
+    logical: &ExecutableConfig,
+    allocation: &TrialAllocation,
+) -> ExecutableConfig {
+    let mut config = logical.clone();
+    config.runtime.gpus = allocation.gpu_devices.len();
+    config
+        .runtime
+        .gpu_devices
+        .clone_from(&allocation.gpu_devices);
+    config.runtime.port = allocation.host_port;
+    config
+}
+
+struct HostPortReservation {
+    listener: TcpListener,
+    port: u16,
+}
+
+fn reserve_host_ports(
+    bind_host: IpAddr,
+    start: u16,
+    count: usize,
+    excluded: &HashSet<u16>,
+) -> Result<(Vec<HostPortReservation>, Option<WarningRecord>)> {
+    if count == 0 {
+        return Err(Error::validation(
+            "parallel execution requires at least one host port",
+        ));
+    }
+    let mut reservations = Vec::with_capacity(count);
+    let mut skipped = Vec::new();
+    for port in start..=u16::MAX {
+        if excluded.contains(&port) {
+            skipped.push(port);
+            continue;
+        }
+        match TcpListener::bind((bind_host, port)) {
+            Ok(listener) => {
+                reservations.push(HostPortReservation { listener, port });
+                if reservations.len() == count {
+                    break;
+                }
+            }
+            Err(source) if source.kind() == std::io::ErrorKind::AddrInUse => {
+                skipped.push(port);
+            }
+            Err(source) => {
+                return Err(Error::new(
+                    ErrorKind::Io,
+                    Some(ExecutionStage::Preflight),
+                    format!("failed to reserve host port {bind_host}:{port}"),
+                )
+                .with_source(source));
+            }
+        }
+    }
+    if reservations.len() != count {
+        return Err(Error::new(
+            ErrorKind::Io,
+            Some(ExecutionStage::Preflight),
+            format!("could not reserve {count} host ports at or above {bind_host}:{start}"),
+        ));
+    }
+    let ports = reservations
+        .iter()
+        .map(|reservation| reservation.port)
+        .collect::<Vec<_>>();
+    let warning = (!skipped.is_empty()).then(|| WarningRecord {
+        kind: ErrorKind::Io,
+        stage: ExecutionStage::Preflight,
+        message: format!(
+            "host port{} {} unavailable; using {}",
+            if skipped.len() == 1 { "" } else { "s" },
+            skipped
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            ports
+                .iter()
+                .map(u16::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    });
+    Ok((reservations, warning))
+}
+
+fn prepare_host_ports(
+    bind_host: IpAddr,
+    start: u16,
+    count: usize,
+) -> Result<(Vec<u16>, Option<WarningRecord>)> {
+    let (reservations, warning) = reserve_host_ports(bind_host, start, count, &HashSet::new())?;
+    let ports = reservations
+        .iter()
+        .map(|reservation| reservation.port)
+        .collect();
+    Ok((ports, warning))
+}
+
+fn scheduler_fallback_warning(
+    kind: RunKind,
+    backend: ExecutionBackend,
+    max_parallel_trials: Option<usize>,
+) -> Option<WarningRecord> {
+    (kind == RunKind::Sweep
+        && backend == ExecutionBackend::InContainer
+        && max_parallel_trials.is_some_and(|cap| cap > 1))
+    .then(|| WarningRecord {
+        kind: ErrorKind::Validation,
+        stage: ExecutionStage::Preflight,
+        message: format!(
+            "sweep.max_parallel_trials={} was requested, but in-container sweeps run sequentially",
+            max_parallel_trials.expect("warning requires a configured cap")
+        ),
+    })
+}
+
+fn packable_lane_count(
+    gpu_pool_size: usize,
+    cap: Option<usize>,
+    demands: impl IntoIterator<Item = usize>,
+) -> usize {
+    let mut demands = demands.into_iter().collect::<Vec<_>>();
+    demands.sort_unstable();
+    let limit = cap.unwrap_or(gpu_pool_size).min(gpu_pool_size);
+    let mut used_gpus = 0;
+    let mut lanes = 0;
+    for demand in demands {
+        if lanes == limit || demand > gpu_pool_size.saturating_sub(used_gpus) {
+            break;
+        }
+        used_gpus += demand;
+        lanes += 1;
+    }
+    lanes
+}
+
+fn prepare_sweep_scheduler(
+    normalized: &NormalizedConfig,
+    hardware: &HardwareProfile,
+    configs: &[ExecutableConfig],
+) -> Result<(LeaseScheduler, Option<WarningRecord>)> {
+    if configs.is_empty() {
+        return Err(Error::validation(
+            "parallel sweep requires at least one candidate",
+        ));
+    }
+    let devices = if normalized.runtime.gpu_devices.is_empty() {
+        hardware
+            .selected_gpus
+            .iter()
+            .map(|gpu| gpu.index.to_string())
+            .collect::<Vec<_>>()
+    } else {
+        normalized.runtime.gpu_devices.clone()
+    };
+    if devices.len() != normalized.runtime.gpus {
+        return Err(Error::validation(format!(
+            "parallel sweep GPU pool has {} devices but runtime.gpus is {}",
+            devices.len(),
+            normalized.runtime.gpus
+        )));
+    }
+    let max_parallel = normalized
+        .sweep
+        .as_ref()
+        .and_then(|sweep| sweep.max_parallel_trials);
+    let demands = configs
+        .iter()
+        .enumerate()
+        .map(|(index, config)| TrialDemand {
+            index,
+            gpus: config.candidate.tensor_parallelism,
+        })
+        .collect::<Vec<_>>();
+    let lane_count = packable_lane_count(
+        devices.len(),
+        max_parallel,
+        demands.iter().map(|demand| demand.gpus),
+    );
+    let (ports, warning) = prepare_host_ports(
+        normalized.runtime.bind_host,
+        normalized.runtime.port,
+        lane_count,
+    )?;
+    Ok((
+        LeaseScheduler::new(devices, ports, max_parallel, demands)?,
+        warning,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_sequential_trials(
+    configs: Vec<ExecutableConfig>,
+    memory: Vec<ModelMemoryOutcome>,
+    trial_count: usize,
+    run_dir: &Path,
+    report_path: &Path,
+    executor: &ProcessExecutor,
+    hf_token: Option<&Secret>,
+    cancellation: &CancellationToken,
+    backend: ExecutionBackend,
+    report: &mut RunReport,
+    progress: &mut impl Write,
+) -> Result<()> {
+    for (index, (config, model_memory)) in configs.into_iter().zip(memory).enumerate() {
+        if cancellation.is_cancelled() {
+            return Err(Error::interrupted(ExecutionStage::Benchmark));
+        }
+        writeln_checked(progress, &format!("trial: {}/{}", index + 1, trial_count))?;
+        let trial = execute_trial(
+            index,
+            config,
+            model_memory,
+            None,
+            None,
+            run_dir,
+            executor,
+            hf_token,
+            cancellation,
+            backend,
+        )?;
+        report.push_trial(trial)?;
+        report.checkpoint(report_path)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_parallel_sweep(
+    configs: Vec<ExecutableConfig>,
+    memory: Vec<ModelMemoryOutcome>,
+    mut scheduler: LeaseScheduler,
+    run_dir: &Path,
+    report_path: &Path,
+    executor: &ProcessExecutor,
+    hf_token: Option<&Secret>,
+    cancellation: &CancellationToken,
+    backend: ExecutionBackend,
+    report: &mut RunReport,
+    progress: &mut impl Write,
+) -> Result<()> {
+    let trial_count = configs.len();
+    let mut work = configs
+        .into_iter()
+        .zip(memory)
+        .map(Some)
+        .collect::<Vec<_>>();
+    let mut completed = BTreeMap::new();
+    let mut next_commit = 0;
+    let workers = cancellation.child();
+    let (sender, receiver) = mpsc::channel();
+
+    thread::scope(|scope| {
+        let mut handles = Vec::new();
+        let mut coordination_error = None;
+
+        while scheduler.has_pending() || scheduler.active_len() > 0 {
+            if coordination_error.is_none() && cancellation.is_cancelled() {
+                workers.cancel();
+                coordination_error = Some(Error::interrupted(ExecutionStage::Benchmark));
+            }
+
+            while coordination_error.is_none() {
+                let Some((index, mut allocation)) = scheduler.next() else {
+                    break;
+                };
+                let Some((config, model_memory)) = work[index].take() else {
+                    let _ = scheduler.release(index);
+                    workers.cancel();
+                    coordination_error = Some(Error::validation(format!(
+                        "trial {index} was dispatched more than once"
+                    )));
+                    break;
+                };
+                let excluded = scheduler
+                    .active_host_ports_except(index)
+                    .collect::<HashSet<_>>();
+                let (mut reservations, warning) = match reserve_host_ports(
+                    config.runtime.bind_host,
+                    allocation.host_port,
+                    1,
+                    &excluded,
+                ) {
+                    Ok(reservations) => reservations,
+                    Err(error) => {
+                        let _ = scheduler.release(index);
+                        workers.cancel();
+                        coordination_error = Some(error);
+                        break;
+                    }
+                };
+                let reservation = reservations
+                    .pop()
+                    .expect("one host-port reservation was requested");
+                allocation.host_port = reservation.port;
+                if let Err(error) = scheduler.update_host_port(index, allocation.host_port) {
+                    let _ = scheduler.release(index);
+                    workers.cancel();
+                    coordination_error = Some(error);
+                    break;
+                }
+                if let Some(warning) = warning {
+                    if let Err(error) = report.push_warning(warning) {
+                        let _ = scheduler.release(index);
+                        workers.cancel();
+                        coordination_error = Some(error);
+                        break;
+                    }
+                }
+                if let Err(error) = writeln_checked(
+                    progress,
+                    &format!(
+                        "trial_started: {}/{} gpus={} port={} lane={}",
+                        index + 1,
+                        trial_count,
+                        allocation.gpu_devices.join(","),
+                        allocation.host_port,
+                        allocation.lane
+                    ),
+                ) {
+                    let _ = scheduler.release(index);
+                    workers.cancel();
+                    coordination_error = Some(error);
+                    break;
+                }
+                let worker_sender = sender.clone();
+                let worker_cancellation = workers.child();
+                handles.push(scope.spawn(move || {
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        execute_trial(
+                            index,
+                            config,
+                            model_memory,
+                            Some(allocation),
+                            Some(reservation),
+                            run_dir,
+                            executor,
+                            hf_token,
+                            &worker_cancellation,
+                            backend,
+                        )
+                    }))
+                    .unwrap_or_else(|_| {
+                        Err(Error::new(
+                            ErrorKind::ProcessExit,
+                            Some(ExecutionStage::Benchmark),
+                            format!("trial {index} worker panicked"),
+                        ))
+                    });
+                    let _ = worker_sender.send((index, outcome));
+                }));
+            }
+
+            if scheduler.active_len() == 0 {
+                if coordination_error.is_none() && scheduler.has_pending() {
+                    coordination_error = Some(Error::validation(
+                        "parallel scheduler could not place a pending trial",
+                    ));
+                }
+                break;
+            }
+
+            match receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok((index, outcome)) => {
+                    let allocation = match scheduler.release(index) {
+                        Ok(allocation) => allocation,
+                        Err(error) => {
+                            workers.cancel();
+                            coordination_error.get_or_insert(error);
+                            continue;
+                        }
+                    };
+                    if coordination_error.is_some() {
+                        continue;
+                    }
+                    match outcome {
+                        Ok(trial) => {
+                            let status = if trial.is_success() {
+                                "success"
+                            } else {
+                                "failed"
+                            };
+                            if let Err(error) = writeln_checked(
+                                progress,
+                                &format!(
+                                    "trial_completed: {}/{} status={} gpus={} port={} lane={}",
+                                    index + 1,
+                                    trial_count,
+                                    status,
+                                    allocation.gpu_devices.join(","),
+                                    allocation.host_port,
+                                    allocation.lane
+                                ),
+                            ) {
+                                workers.cancel();
+                                coordination_error = Some(error);
+                                continue;
+                            }
+                            completed.insert(index, trial);
+                            while let Some(trial) = completed.remove(&next_commit) {
+                                if let Err(error) = report
+                                    .push_trial(trial)
+                                    .and_then(|()| report.checkpoint(report_path))
+                                {
+                                    workers.cancel();
+                                    coordination_error = Some(error);
+                                    break;
+                                }
+                                next_commit += 1;
+                            }
+                        }
+                        Err(error) => {
+                            workers.cancel();
+                            coordination_error = Some(error);
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    workers.cancel();
+                    coordination_error.get_or_insert_with(|| {
+                        Error::new(
+                            ErrorKind::ProcessExit,
+                            Some(ExecutionStage::Benchmark),
+                            "parallel trial result channel disconnected",
+                        )
+                    });
+                    break;
+                }
+            }
+        }
+
+        drop(sender);
+        for handle in handles {
+            if handle.join().is_err() {
+                coordination_error.get_or_insert_with(|| {
+                    Error::new(
+                        ErrorKind::ProcessExit,
+                        Some(ExecutionStage::Benchmark),
+                        "parallel trial worker panicked",
+                    )
+                });
+            }
+        }
+
+        if let Some(error) = coordination_error {
+            Err(error)
+        } else if next_commit != trial_count {
+            Err(Error::validation(format!(
+                "parallel sweep completed {next_commit} of {trial_count} trials"
+            )))
+        } else {
+            Ok(())
+        }
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_trial(
     index: usize,
     config: ExecutableConfig,
     model_memory: ModelMemoryOutcome,
+    allocation: Option<TrialAllocation>,
+    port_reservation: Option<HostPortReservation>,
     run_dir: &Path,
     executor: &ProcessExecutor,
     hf_token: Option<&Secret>,
     cancellation: &CancellationToken,
     backend: ExecutionBackend,
 ) -> Result<TrialOutcome> {
+    let execution_config = allocation.as_ref().map_or_else(
+        || config.clone(),
+        |lease| config_for_allocation(&config, lease),
+    );
     let TrialExecution {
-        config,
+        config: _,
         model_memory,
         relative_dir,
         truncated,
@@ -918,8 +1412,9 @@ fn execute_trial(
     } = execute_trial_steps(
         TrialExecutionInput {
             index,
-            config,
+            config: execution_config,
             model_memory,
+            port_reservation,
             run_benchmark: true,
         },
         run_dir,
@@ -932,6 +1427,7 @@ fn execute_trial(
         index,
         config,
         model_memory,
+        allocation,
         run_dir,
         &relative_dir,
         truncated,
@@ -954,6 +1450,7 @@ fn execute_trial_steps(
         config,
         model_memory,
         run_benchmark,
+        port_reservation,
     } = input;
     let relative_dir = PathBuf::from("trials").join(format!("{index:04}"));
     let trial_dir = run_dir.join(&relative_dir);
@@ -979,6 +1476,9 @@ fn execute_trial_steps(
         }
     };
     attach_hf_token(&mut plan, hf_token, backend);
+    if let Some(HostPortReservation { listener, .. }) = port_reservation {
+        drop(listener);
+    }
     let mut server =
         match ManagedServer::start(executor, &plan.server, plan.readiness.clone(), cancellation) {
             Ok(server) => match server.wait_ready(cancellation) {
@@ -1178,6 +1678,7 @@ fn finish_trial(
     index: usize,
     config: ExecutableConfig,
     model_memory: ModelMemoryOutcome,
+    allocation: Option<TrialAllocation>,
     run_dir: &Path,
     relative_dir: &Path,
     truncated: HashSet<PathBuf>,
@@ -1194,6 +1695,7 @@ fn finish_trial(
             metrics,
             correctness,
             model_memory,
+            allocation,
             artifacts,
         },
         None => TrialOutcome::Success {
@@ -1208,6 +1710,7 @@ fn finish_trial(
             })?,
             correctness,
             model_memory,
+            allocation,
             artifacts,
         },
     })
@@ -1608,5 +2111,97 @@ mod tests {
                 .any(|(name, value)| name == "HF_TOKEN" && value == token.expose()));
             assert!(!process.safe_display.contains(token.expose()));
         }
+    }
+
+    #[test]
+    fn trial_lease_changes_only_the_execution_copy() {
+        let logical = ConfigInput::minimal(Engine::Vllm, "repo/model")
+            .normalize()
+            .unwrap()
+            .into_executable(ResolvedImage {
+                requested: "repo/image:tag".into(),
+                immutable: "repo/image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                local_only: false,
+            });
+        let leased = config_for_allocation(
+            &logical,
+            &TrialAllocation {
+                gpu_devices: vec!["GPU-2".into(), "GPU-3".into()],
+                host_port: 9_001,
+                lane: 1,
+            },
+        );
+
+        assert_eq!(logical.runtime.gpus, 1);
+        assert!(logical.runtime.gpu_devices.is_empty());
+        assert_ne!(logical.runtime.port, 9_001);
+        assert_eq!(leased.runtime.gpus, 2);
+        assert_eq!(leased.runtime.gpu_devices, ["GPU-2", "GPU-3"]);
+        assert_eq!(leased.runtime.port, 9_001);
+        let directory = tempfile::tempdir().unwrap();
+        let plan = managed_run_plan(
+            &leased,
+            "trial-1",
+            directory.path(),
+            ExecutionBackend::Docker,
+        )
+        .unwrap();
+        let server_args = plan
+            .server
+            .args
+            .iter()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>();
+        assert!(server_args.iter().any(|arg| arg == "device=GPU-2,GPU-3"));
+        assert!(server_args.iter().any(|arg| arg.contains(":9001:")));
+        assert_eq!(plan.readiness.address.port(), 9_001);
+    }
+
+    #[test]
+    fn busy_initial_port_is_skipped_with_a_warning() {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let busy = listener.local_addr().unwrap().port();
+        if busy == u16::MAX {
+            return;
+        }
+
+        let excluded = HashSet::from([busy + 1]);
+        let (reservations, warning) = reserve_host_ports(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            busy,
+            1,
+            &excluded,
+        )
+        .unwrap();
+        let reserved = reservations[0].port;
+
+        assert_ne!(reserved, busy);
+        assert_ne!(reserved, busy + 1);
+        assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, reserved)).is_err());
+        assert!(warning.unwrap().message.contains("unavailable"));
+        drop(reservations);
+        assert!(std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, reserved)).is_ok());
+    }
+
+    #[test]
+    fn port_lane_count_uses_actual_gpu_packing_capacity() {
+        assert_eq!(packable_lane_count(4, None, [4, 4]), 1);
+        assert_eq!(packable_lane_count(4, None, [1, 1, 2, 4]), 3);
+        assert_eq!(packable_lane_count(4, Some(2), [1, 1, 1]), 2);
+    }
+
+    #[test]
+    fn in_container_parallel_cap_emits_scheduler_fallback_warning() {
+        let warning =
+            scheduler_fallback_warning(RunKind::Sweep, ExecutionBackend::InContainer, Some(2))
+                .unwrap();
+
+        assert_eq!(warning.kind, ErrorKind::Validation);
+        assert_eq!(warning.stage, ExecutionStage::Preflight);
+        assert!(warning.message.contains("run sequentially"));
+        assert!(
+            scheduler_fallback_warning(RunKind::Sweep, ExecutionBackend::InContainer, Some(1))
+                .is_none()
+        );
     }
 }

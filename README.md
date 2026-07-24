@@ -10,9 +10,10 @@ plus a ready-to-run winning configuration.
 
 Today it drives **vLLM** and **SGLang**, running either on your own NVIDIA GPU
 host via Docker or on [Hugging Face Jobs](#run-on-hugging-face-jobs) with no
-GPU of your own. It is not a cluster scheduler or an automatic tuner:
-candidates run one at a time, and ranking covers only the candidates you
-declare.
+GPU of your own. It is not a cluster scheduler or an automatic tuner: local
+Docker sweeps can pack candidates across a selected multi-GPU pool, while
+HF Jobs/in-container sweeps remain sequential; ranking covers only the
+candidates you declare.
 
 **Jump to:**
 [Quickstart](#quickstart) ·
@@ -172,8 +173,9 @@ Key rules:
   CLI; `[serve]` holds raw engine arguments. Names are canonicalized,
   deduplicated, and validated against the schema of the actual image. CLI
   equivalents: `--serve-arg NAME=VALUE`, `--serve-flag NAME`.
-- Tensor parallelism must be nonzero, cannot exceed the GPU count, and must
-  divide it evenly. Explicit `gpu_devices` must be unique and match `gpus`.
+- Tensor parallelism must be nonzero and cannot exceed the GPU count. In a
+  local Docker sweep, each trial leases exactly that many GPUs from the
+  selected pool. Explicit `gpu_devices` must be unique and match `gpus`.
 - Precedence: config file first, explicit CLI overrides win. Environment
   variables never change benchmark settings; only integration/secret lookups
   are read (`HF_TOKEN`, `HUGGING_FACE_HUB_TOKEN`, `HF_TOKEN_PATH`, `HF_HOME`,
@@ -188,11 +190,29 @@ deterministically and fails fast if it exceeds `max_trials`:
 ```toml
 [sweep]
 max_trials = 4
+max_parallel_trials = 2        # optional cap; omit for automatic GPU packing
 tensor_parallelism = [1, 2]
 
 [sweep.serve]                  # engine-specific dimensions
 kv-cache-dtype = ["auto", "fp8"]
 ```
+
+Local Docker sweeps schedule trials concurrently when their tensor-parallel
+GPU demands fit disjoint subsets of the selected `runtime.gpus` /
+`runtime.gpu_devices` pool. Pending trials stay in declaration order, with
+greedy backfill when an earlier trial is temporarily too large for the free
+subset. `--max-parallel-trials 1` forces sequential execution; higher values
+cap concurrency without permitting GPU oversubscription. Each active trial
+gets a distinct host port. HF Jobs and `--in-container` sweeps stay sequential
+because one job/container owns one engine process namespace.
+
+Parallelism is primarily a search-throughput optimization, not measurement
+isolation. Active trials receive disjoint GPUs, but their engine processes
+still share host resources such as CPU, memory, storage and cache I/O,
+networking, PCIe bandwidth, and power or thermal headroom. Contention can
+shift benchmark metrics and usually prevents perfectly linear wall-time
+speedups. When candidates rank closely, rerun the finalists with
+`max_parallel_trials = 1` before treating the ranking as conclusive.
 
 Runnable examples live in [`examples/`](examples/).
 
@@ -216,6 +236,8 @@ Runnable examples live in [`examples/`](examples/).
 - **Local Docker (default).** Every engine invocation is wrapped in
   `docker run --gpus ...`; images are resolved to immutable digests, and the
   run owns and cleans up its containers.
+  Multi-GPU sweeps lease disjoint GPU subsets and distinct host ports per
+  active trial; use `--max-parallel-trials` to cap concurrency.
 - **Inside a container (`--in-container`).** The engine binaries run as direct
   child processes — no Docker daemon needed. Use it in an environment that
   already provides the engine image (this is how jobs execute on HF Jobs).
@@ -292,6 +314,10 @@ Every executed run creates a private directory (default under
   candidate succeeds).
 - `trials/NNNN/` — per-trial correctness, benchmark, and bounded diagnostic
   artifacts.
+  Local parallel sweeps record each trial's leased GPU IDs, host port, and
+  execution lane; any preflight port fallback is recorded under top-level
+  `warnings`. These physical leases are diagnostic only and are not written
+  into `best.toml`.
 
 A failed candidate does not abort a sweep: each failure records a typed
 stage/kind and bounded stdout/stderr tails. Ranking considers correctness

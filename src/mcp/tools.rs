@@ -236,6 +236,7 @@ pub(super) struct TrialSummary {
     /// Compact failure payload (kind/stage/message flags); output tails live
     /// in the durable report.
     failure: Option<Value>,
+    allocation: Option<crate::sweep::TrialAllocation>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -254,6 +255,7 @@ pub(super) struct EvaluationSummary {
     best_trial_index: Option<usize>,
     best_winning_value: Option<f64>,
     best_config_path: Option<PathBuf>,
+    warnings: Vec<crate::results::report::WarningRecord>,
     /// Per-trial summaries, capped at 32 entries; the winning trial is always
     /// included.
     trials: Vec<TrialSummary>,
@@ -298,6 +300,8 @@ struct ReportView {
     best_winning_value: Option<f64>,
     #[serde(default)]
     best_config_path: Option<PathBuf>,
+    #[serde(default)]
+    warnings: Vec<crate::results::report::WarningRecord>,
 }
 
 #[derive(Deserialize)]
@@ -312,6 +316,8 @@ struct TrialView {
     correctness: Option<Value>,
     #[serde(default)]
     failure: Option<Value>,
+    #[serde(default)]
+    allocation: Option<crate::sweep::TrialAllocation>,
 }
 
 #[derive(Deserialize)]
@@ -647,6 +653,7 @@ fn evaluation_summary(
         best_trial_index: result.report.best_trial_index,
         best_winning_value: result.report.best_winning_value,
         best_config_path: result.report.best_config_path,
+        warnings: result.report.warnings,
         trials_truncated: result.report.trials.len() > MAX_TRIAL_SUMMARIES,
         trials,
         output: String::from_utf8_lossy(terminal).into_owned(),
@@ -666,6 +673,7 @@ fn trial_summary(trial: &crate::results::report::TrialOutcome, metric: Metric) -
             config,
             metrics,
             correctness,
+            allocation,
             ..
         } => TrialSummary {
             index: *index,
@@ -678,6 +686,7 @@ fn trial_summary(trial: &crate::results::report::TrialOutcome, metric: Metric) -
                 .as_ref()
                 .and_then(|value| serde_json::to_value(value).ok()),
             failure: None,
+            allocation: allocation.clone(),
         },
         TrialOutcome::Failed {
             index,
@@ -685,6 +694,7 @@ fn trial_summary(trial: &crate::results::report::TrialOutcome, metric: Metric) -
             failure,
             metrics,
             correctness,
+            allocation,
             ..
         } => TrialSummary {
             index: *index,
@@ -697,6 +707,7 @@ fn trial_summary(trial: &crate::results::report::TrialOutcome, metric: Metric) -
                 .as_ref()
                 .and_then(|value| serde_json::to_value(value).ok()),
             failure: serde_json::to_value(failure).ok().map(compact_failure),
+            allocation: allocation.clone(),
         },
     }
 }
@@ -780,6 +791,7 @@ fn report_view_summary(view: ReportView, report_path: PathBuf) -> EvaluationSumm
                 metrics: trial.metrics,
                 correctness: trial.correctness,
                 failure: trial.failure.map(compact_failure),
+                allocation: trial.allocation,
             }
         })
         .collect();
@@ -795,6 +807,7 @@ fn report_view_summary(view: ReportView, report_path: PathBuf) -> EvaluationSumm
         best_trial_index: view.best_trial_index,
         best_winning_value: view.best_winning_value,
         best_config_path: view.best_config_path,
+        warnings: view.warnings,
         trials,
         trials_truncated: trial_count > MAX_TRIAL_SUMMARIES,
         output: String::new(),
@@ -1333,6 +1346,11 @@ mod tests {
             requested_image: "repo/image:tag".into(),
             resolved_image: None,
             selected_hardware: None,
+            warnings: vec![crate::results::report::WarningRecord {
+                kind: ErrorKind::Validation,
+                stage: crate::error::ExecutionStage::Preflight,
+                message: "parallel execution unavailable; using one lane".into(),
+            }],
             started_at_unix_ms: 1,
             ended_at_unix_ms: Some(2),
             duration_ms: Some(1),
@@ -1343,6 +1361,11 @@ mod tests {
                     metrics: winner,
                     correctness: None,
                     model_memory: ModelMemoryOutcome::default(),
+                    allocation: Some(crate::sweep::TrialAllocation {
+                        gpu_devices: vec!["GPU-7".into()],
+                        host_port: 8_000,
+                        lane: 0,
+                    }),
                     artifacts: Vec::new(),
                 },
                 TrialOutcome::Failed {
@@ -1358,6 +1381,7 @@ mod tests {
                     metrics: None,
                     correctness: None,
                     model_memory: ModelMemoryOutcome::default(),
+                    allocation: None,
                     artifacts: Vec::new(),
                 },
             ],
@@ -1394,6 +1418,11 @@ mod tests {
         assert_eq!(trials.len(), 2);
         assert_eq!(trials[0]["status"], "success");
         assert_eq!(trials[0]["winning_value"], 1200.5);
+        assert_eq!(call.value["warnings"][0]["stage"], "preflight");
+        assert_eq!(
+            trials[0]["allocation"]["gpu_devices"],
+            serde_json::json!(["GPU-7"])
+        );
         assert_eq!(trials[1]["status"], "failed");
         assert_eq!(trials[1]["failure"]["message"], "server crashed");
         // Output tails stay in the durable report, not the summary.

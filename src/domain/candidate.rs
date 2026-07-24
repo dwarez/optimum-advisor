@@ -95,6 +95,8 @@ pub(crate) struct CandidateSpec {
 pub(crate) struct SweepSpec {
     #[schemars(range(min = 1))]
     pub max_trials: usize,
+    #[schemars(range(min = 1))]
+    pub max_parallel_trials: Option<usize>,
     pub tensor_parallelism: Option<Vec<usize>>,
     pub memory_fraction: Option<Vec<f64>>,
     pub prefill_token_budget: Option<Vec<u32>>,
@@ -110,6 +112,11 @@ impl SweepSpec {
             ));
         }
 
+        if self.max_parallel_trials == Some(0) {
+            return Err(Error::validation(
+                "sweep.max_parallel_trials must be greater than zero",
+            ));
+        }
         let mut dimension_sizes = Vec::new();
         let mut has_real_dimension = false;
         collect_dimension_size(
@@ -405,6 +412,7 @@ mod tests {
         };
         let sweep = SweepSpec {
             max_trials: 256,
+            max_parallel_trials: None,
             tensor_parallelism: Some(vec![1, 2]),
             memory_fraction: Some(vec![0.8, 0.9]),
             prefill_token_budget: None,
@@ -432,6 +440,27 @@ mod tests {
         assert_eq!(candidates[4].candidate.tensor_parallelism, 2);
     }
 
+    #[test]
+    fn rejects_zero_parallel_trial_cap() {
+        let sweep = SweepSpec {
+            max_trials: 1,
+            max_parallel_trials: Some(0),
+            ..SweepSpec::default()
+        };
+        let base = CandidateSpec {
+            candidate: Candidate {
+                tensor_parallelism: 1,
+                memory_fraction: 0.9,
+                prefill_token_budget: 8192,
+                max_running_requests: 256,
+            },
+            serve_args: Vec::new(),
+        };
+
+        let error = sweep.candidates(&base).unwrap_err();
+
+        assert!(error.to_string().contains("max_parallel_trials"));
+    }
     #[test]
     fn rejects_trial_count_overflow_before_allocation() {
         let error = checked_trial_product([usize::MAX, 2], usize::MAX).unwrap_err();

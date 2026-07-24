@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - model-aware metric defaults: `tpot` for model IDs up to 3B and `tps` otherwise
 - actionable MCP schema guidance for normalized serving fields
+- run local Docker sweep trials concurrently on disjoint GPU leases, with
+  configurable concurrency, per-trial allocation metadata, and deterministic
+  result ordering
 
 ### Fixed
 
