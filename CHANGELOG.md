@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/dwarez/optimum-advisor/compare/v0.1.6...v0.1.7) - 2026-07-24
+
+### Added
+
+- setup for supporting parallel benchmark execution ([#33](https://github.com/dwarez/optimum-advisor/pull/33))
+
 ## [0.1.6](https://github.com/dwarez/optimum-advisor/compare/v0.1.5...v0.1.6) - 2026-07-21
 
 ### Added
