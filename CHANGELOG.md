@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stop), and an animated spinner with elapsed time when stderr is an
   interactive terminal
 
+### Fixed
+
+- pin `xxhash==3.2.0` in the correctness environment (in-job and local setup
+  script): lighteval 0.13.0 passes unencoded strings to `xxhash.xxh64` when
+  hashing sample details, and xxhash 3.3.0 turned that into a `TypeError`
+  that failed every correctness run at the metrics stage
+
 ## [0.1.6](https://github.com/dwarez/optimum-advisor/compare/v0.1.5...v0.1.6) - 2026-07-21
 
 ### Added

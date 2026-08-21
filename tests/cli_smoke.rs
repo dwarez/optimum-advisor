@@ -151,6 +151,8 @@ fn hf_jobs_submission_is_a_rendered_dry_run() {
     assert!(text.contains("--results-dir /tmp/optimum-advisor-results"));
     assert!(text.contains("uv pip install --quiet"));
     assert!(text.contains("lighteval==0.13.0"));
+    // Capped below 3.3: lighteval 0.13.0 passes unencoded str to xxh64.
+    assert!(text.contains("xxhash==3.2.0"));
     assert!(text.contains("find /tmp/optimum-advisor-results -name report.json"));
 
     // With a bucket: mounted read-write, no log dump.

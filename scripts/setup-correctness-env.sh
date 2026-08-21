@@ -24,15 +24,19 @@ VIRTUAL_ENV="$venv_dir"
 PATH="$venv_dir/bin:$PATH"
 export VIRTUAL_ENV PATH
 
-log 'running: uv pip install lighteval==0.13.0 litellm==1.66.0 diskcache==5.6.3 langdetect==1.0.9'
+# xxhash is pinned to the last release that accepts str input: lighteval
+# 0.13.0 passes unencoded strings to xxhash.xxh64 when hashing sample details,
+# and xxhash 3.3.0 turned that into a TypeError.
+log 'running: uv pip install lighteval==0.13.0 litellm==1.66.0 diskcache==5.6.3 langdetect==1.0.9 xxhash==3.2.0'
 uv pip install \
   "lighteval==0.13.0" \
   "litellm==1.66.0" \
   "diskcache==5.6.3" \
-  "langdetect==1.0.9"
+  "langdetect==1.0.9" \
+  "xxhash==3.2.0"
 
 log "verifying imports"
-python -c "import diskcache, langdetect, lighteval, litellm"
+python -c "import diskcache, langdetect, lighteval, litellm, xxhash"
 
 log "done"
 log "activate with: source .venv/bin/activate"

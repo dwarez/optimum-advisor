@@ -46,11 +46,17 @@ const RESULTS_MOUNT: &str = "/results";
 const LOCAL_RESULTS: &str = "/tmp/optimum-advisor-results";
 
 /// Pinned correctness tools, mirroring `scripts/setup-correctness-env.sh`.
-const CORRECTNESS_PACKAGES: [&str; 4] = [
+/// `xxhash` is pinned to the last release that accepts `str` input: lighteval
+/// 0.13.0 passes unencoded strings to `xxhash.xxh64` when hashing sample
+/// details, and xxhash 3.3.0 turned that into a TypeError. The pin forces a
+/// source build on Python 3.12 (no cp312 wheel), which the engine images'
+/// toolchain covers.
+const CORRECTNESS_PACKAGES: [&str; 5] = [
     "lighteval==0.13.0",
     "litellm==1.66.0",
     "diskcache==5.6.3",
     "langdetect==1.0.9",
+    "xxhash==3.2.0",
 ];
 
 pub(crate) fn submit(
@@ -431,6 +437,8 @@ mod tests {
         assert!(!bucket.contains("cargo build"));
         assert!(bucket.contains("uv venv /tmp/optimum-advisor-correctness"));
         assert!(bucket.contains("lighteval==0.13.0"));
+        // Capped below 3.3: lighteval 0.13.0 passes unencoded str to xxh64.
+        assert!(bucket.contains("xxhash==3.2.0"));
         // Only `lighteval` is exposed; `python3` must keep resolving to the
         // base image (the venv interpreter cannot import the engine).
         assert!(bucket
