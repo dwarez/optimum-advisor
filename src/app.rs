@@ -9,7 +9,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use schemars::JsonSchema;
@@ -60,6 +60,7 @@ use crate::{
         server::ManagedServer,
     },
     sweep::{LeaseScheduler, TrialAllocation, TrialDemand},
+    terminal::{format_elapsed, Spinner},
 };
 
 const LEADERBOARD_TIMEOUT: Duration = Duration::from_secs(30);
@@ -96,7 +97,7 @@ pub(crate) struct CorrectnessCheckResult {
 pub fn run(
     args: impl Iterator<Item = String>,
     mut stdout: impl Write,
-    mut stderr: impl Write,
+    mut stderr: impl Write + Send,
 ) -> Result<()> {
     match args::parse(args)? {
         ParsedCli::Display(text) => write_text(&mut stdout, &text),
@@ -309,7 +310,7 @@ pub(crate) fn run_evaluation(
     invocation: Invocation,
     kind: RunKind,
     out: &mut impl Write,
-    progress: &mut impl Write,
+    progress: &mut (impl Write + Send),
 ) -> Result<Option<EvaluationResult>> {
     let cancellation = cancellation_token()?;
     run_evaluation_with_cancellation(invocation, kind, out, progress, &cancellation)
@@ -319,7 +320,7 @@ pub(crate) fn run_evaluation_with_cancellation(
     invocation: Invocation,
     kind: RunKind,
     out: &mut impl Write,
-    progress: &mut impl Write,
+    progress: &mut (impl Write + Send),
     cancellation: &CancellationToken,
 ) -> Result<Option<EvaluationResult>> {
     let normalized = invocation.input.clone().normalize()?;
@@ -346,7 +347,8 @@ pub(crate) fn run_evaluation_with_cancellation(
     );
     report.checkpoint(&report_path)?;
 
-    let preflight = evaluation_preflight(&invocation, &normalized, kind, cancellation);
+    let preflight =
+        evaluation_preflight(&invocation, &normalized, kind, cancellation, &mut *progress);
     let (credentials, executor, identity, hardware, configs, memory) = match preflight {
         Ok(preflight) => preflight,
         Err(error) => {
@@ -464,6 +466,8 @@ pub(crate) fn run_evaluation_with_cancellation(
             .with_report_path(&report_path)
             .with_source(source)
         })?;
+        let submission_started = Instant::now();
+        let submission_spinner = stage_begin(&mut *progress, "leaderboard: submitting report")?;
         match client.submit_report(
             &report_json,
             &submission.contributor,
@@ -471,6 +475,12 @@ pub(crate) fn run_evaluation_with_cancellation(
             credentials.hf_token.as_ref(),
         ) {
             Ok(result) => {
+                stage_end(
+                    &mut *progress,
+                    submission_spinner,
+                    submission_started,
+                    "leaderboard: report submitted",
+                )?;
                 let state = if result.message.starts_with("Accepted:") {
                     SubmissionState::Accepted
                 } else {
@@ -522,6 +532,7 @@ struct CorrectnessRun {
 
 pub(crate) fn run_correctness_check_with_cancellation(
     invocation: Invocation,
+    progress: &mut (impl Write + Send),
     cancellation: &CancellationToken,
 ) -> Result<CorrectnessCheckResult> {
     let normalized = invocation.input.clone().normalize()?;
@@ -545,11 +556,16 @@ pub(crate) fn run_correctness_check_with_cancellation(
         run_dir,
         started_at_unix_ms: now_millis()?,
     };
-    let (credentials, executor, _, _, mut configs, mut memory) =
-        match evaluation_preflight(&invocation, &normalized, RunKind::Bench, cancellation) {
-            Ok(preflight) => preflight,
-            Err(error) => return persist_correctness_error(&run, None, Vec::new(), error),
-        };
+    let (credentials, executor, _, _, mut configs, mut memory) = match evaluation_preflight(
+        &invocation,
+        &normalized,
+        RunKind::Bench,
+        cancellation,
+        &mut *progress,
+    ) {
+        Ok(preflight) => preflight,
+        Err(error) => return persist_correctness_error(&run, None, Vec::new(), error),
+    };
     if configs.len() != 1 || memory.len() != 1 {
         return persist_correctness_error(
             &run,
@@ -567,6 +583,10 @@ pub(crate) fn run_correctness_check_with_cancellation(
             model_memory: memory.remove(0),
             run_benchmark: false,
             port_reservation: None,
+            stage: Some(StageProgress {
+                progress: &mut *progress,
+                trial_count: 1,
+            }),
         },
         &run.run_dir,
         &executor,
@@ -722,6 +742,7 @@ fn evaluation_preflight(
     normalized: &NormalizedConfig,
     kind: RunKind,
     cancellation: &CancellationToken,
+    progress: &mut impl Write,
 ) -> Result<Preflight> {
     let hf_token = resolve_hf_token(&ProcessExecutor::default(), cancellation)?;
     let submission = if normalized.leaderboard.submit {
@@ -745,6 +766,11 @@ fn evaluation_preflight(
         redactions.push(key.expose());
     }
     let executor = ProcessExecutor::with_credentials(redactions);
+    let started = Instant::now();
+    let spinner = stage_begin(
+        progress,
+        &format!("preflight: resolving image {}", normalized.image),
+    )?;
     let identity = match invocation.backend {
         ExecutionBackend::Docker => resolve_image(
             &normalized.image,
@@ -755,8 +781,24 @@ fn evaluation_preflight(
         )?,
         ExecutionBackend::InContainer => in_container_image_identity(&normalized.image)?,
     };
+    stage_end(
+        progress,
+        spinner,
+        started,
+        &format!("preflight: image {}", identity.immutable),
+    )?;
+    let started = Instant::now();
+    let spinner = stage_begin(progress, "preflight: inspecting hardware")?;
     let hardware = inspect_hardware(&normalized.runtime, &executor, cancellation)?;
+    stage_end(
+        progress,
+        spinner,
+        started,
+        &format!("preflight: hardware {}", hardware_summary(&hardware)),
+    )?;
     let configs = executable_candidates(normalized, &identity.resolved(), kind)?;
+    let started = Instant::now();
+    let spinner = stage_begin(progress, "preflight: validating serving parameters")?;
     validate_parameter_sets(
         invocation,
         &configs,
@@ -764,13 +806,34 @@ fn evaluation_preflight(
         &executor,
         cancellation,
     )?;
+    stage_end(
+        progress,
+        spinner,
+        started,
+        "preflight: serving parameters valid",
+    )?;
     let memory_command = resolve_hf_mem_command(normalized.model_memory.command.as_deref());
+    let estimate_memory = normalized.model_memory.enabled;
+    let started = Instant::now();
+    let spinner = if estimate_memory {
+        stage_begin(progress, "preflight: estimating model memory")?
+    } else {
+        None
+    };
     let memory = configs
         .iter()
         .map(|config| {
             estimate_model_memory(config, memory_command.clone(), &executor, cancellation)
         })
         .collect::<Result<Vec<_>>>()?;
+    if estimate_memory {
+        stage_end(
+            progress,
+            spinner,
+            started,
+            "preflight: model memory estimated",
+        )?;
+    }
     Ok((
         RuntimeCredentials {
             hf_token,
@@ -782,6 +845,21 @@ fn evaluation_preflight(
         configs,
         memory,
     ))
+}
+
+fn hardware_summary(profile: &HardwareProfile) -> String {
+    let names: Vec<&str> = profile
+        .selected_gpus
+        .iter()
+        .map(|gpu| gpu.name.as_str())
+        .collect();
+    let first = names.first().copied().unwrap_or("unknown");
+    let gpus = if names.iter().all(|name| *name == first) {
+        format!("{}x {first}", names.len())
+    } else {
+        names.join(", ")
+    };
+    format!("{gpus} ({} visible)", profile.all_gpus.len())
 }
 
 fn validate_parameter_sets(
@@ -905,12 +983,72 @@ fn render_plans(
     Ok(())
 }
 
-struct TrialExecutionInput {
+/// Progress writer for one sequential trial. Parallel sweeps pass `None`
+/// because worker threads must not share the progress stream.
+struct StageProgress<'a> {
+    progress: &'a mut (dyn Write + Send),
+    trial_count: usize,
+}
+
+fn stage_begin(progress: &mut (impl Write + ?Sized), line: &str) -> Result<Option<Spinner>> {
+    writeln_checked(progress, line)?;
+    Ok(Spinner::start(line))
+}
+
+fn stage_end(
+    progress: &mut (impl Write + ?Sized),
+    spinner: Option<Spinner>,
+    started: Instant,
+    line: &str,
+) -> Result<()> {
+    if let Some(spinner) = spinner {
+        spinner.stop();
+    }
+    writeln_checked(
+        progress,
+        &format!("{line} in {}", format_elapsed(started.elapsed())),
+    )
+}
+
+fn trial_stage_begin(
+    stage: &mut Option<StageProgress>,
+    index: usize,
+    text: &str,
+) -> Result<Option<Spinner>> {
+    let Some(stage) = stage.as_mut() else {
+        return Ok(None);
+    };
+    stage_begin(
+        &mut *stage.progress,
+        &format!("trial {}/{}: {text}", index + 1, stage.trial_count),
+    )
+}
+
+fn trial_stage_end(
+    stage: &mut Option<StageProgress>,
+    index: usize,
+    spinner: Option<Spinner>,
+    started: Instant,
+    text: &str,
+) -> Result<()> {
+    let Some(stage) = stage.as_mut() else {
+        return Ok(());
+    };
+    stage_end(
+        &mut *stage.progress,
+        spinner,
+        started,
+        &format!("trial {}/{}: {text}", index + 1, stage.trial_count),
+    )
+}
+
+struct TrialExecutionInput<'a> {
     index: usize,
     config: ExecutableConfig,
     model_memory: ModelMemoryOutcome,
     run_benchmark: bool,
     port_reservation: Option<HostPortReservation>,
+    stage: Option<StageProgress<'a>>,
 }
 
 struct TrialExecution {
@@ -1129,7 +1267,7 @@ fn execute_sequential_trials(
     cancellation: &CancellationToken,
     backend: ExecutionBackend,
     report: &mut RunReport,
-    progress: &mut impl Write,
+    progress: &mut (impl Write + Send),
 ) -> Result<()> {
     for (index, (config, model_memory)) in configs.into_iter().zip(memory).enumerate() {
         if cancellation.is_cancelled() {
@@ -1147,6 +1285,10 @@ fn execute_sequential_trials(
             hf_token,
             cancellation,
             backend,
+            Some(StageProgress {
+                progress: &mut *progress,
+                trial_count,
+            }),
         )?;
         report.push_trial(trial)?;
         report.checkpoint(report_path)?;
@@ -1267,6 +1409,7 @@ fn execute_parallel_sweep(
                             hf_token,
                             &worker_cancellation,
                             backend,
+                            None,
                         )
                     }))
                     .unwrap_or_else(|_| {
@@ -1396,6 +1539,7 @@ fn execute_trial(
     hf_token: Option<&Secret>,
     cancellation: &CancellationToken,
     backend: ExecutionBackend,
+    stage: Option<StageProgress>,
 ) -> Result<TrialOutcome> {
     let execution_config = allocation.as_ref().map_or_else(
         || config.clone(),
@@ -1416,6 +1560,7 @@ fn execute_trial(
             model_memory,
             port_reservation,
             run_benchmark: true,
+            stage,
         },
         run_dir,
         executor,
@@ -1451,7 +1596,9 @@ fn execute_trial_steps(
         model_memory,
         run_benchmark,
         port_reservation,
+        stage,
     } = input;
+    let mut stage = stage;
     let relative_dir = PathBuf::from("trials").join(format!("{index:04}"));
     let trial_dir = run_dir.join(&relative_dir);
     create_private_dir(&trial_dir)?;
@@ -1479,6 +1626,16 @@ fn execute_trial_steps(
     if let Some(HostPortReservation { listener, .. }) = port_reservation {
         drop(listener);
     }
+    let mut server_detail = format!("port {}", config.runtime.port);
+    if !config.runtime.gpu_devices.is_empty() {
+        server_detail.push_str(&format!(", gpus {}", config.runtime.gpu_devices.join(",")));
+    }
+    let server_started = Instant::now();
+    let server_spinner = trial_stage_begin(
+        &mut stage,
+        index,
+        &format!("server starting ({server_detail})"),
+    )?;
     let mut server =
         match ManagedServer::start(executor, &plan.server, plan.readiness.clone(), cancellation) {
             Ok(server) => match server.wait_ready(cancellation) {
@@ -1503,10 +1660,23 @@ fn execute_trial_steps(
                 None
             }
         };
+    trial_stage_end(
+        &mut stage,
+        index,
+        server_spinner,
+        server_started,
+        if failure.is_none() {
+            "server ready"
+        } else {
+            "server failed"
+        },
+    )?;
 
     if failure.is_none() && config.correctness.enabled {
         let directory = trial_dir.join("correctness");
         create_private_dir(&directory)?;
+        let correctness_started = Instant::now();
+        let correctness_spinner = trial_stage_begin(&mut stage, index, "correctness running")?;
         let suite = correctness_suite(config.correctness.threshold);
         let mut lighteval = lighteval_spec(&config, &suite, &directory);
         if let Some(token) = hf_token {
@@ -1562,9 +1732,22 @@ fn execute_trial_steps(
                 Err(error) => failure = Some(error_trial_failure(error)),
             }
         }
+        trial_stage_end(
+            &mut stage,
+            index,
+            correctness_spinner,
+            correctness_started,
+            if failure.is_none() {
+                "correctness passed"
+            } else {
+                "correctness failed"
+            },
+        )?;
     }
 
     if failure.is_none() && run_benchmark {
+        let benchmark_started = Instant::now();
+        let benchmark_spinner = trial_stage_begin(&mut stage, index, "benchmark running")?;
         match executor.execute(&plan.benchmark, cancellation) {
             Ok(outcome) => {
                 match capture_process_outcome(outcome, &plan.benchmark, run_dir, &mut truncated) {
@@ -1589,9 +1772,29 @@ fn execute_trial_steps(
                 ));
             }
         }
+        let benchmark_line = if failure.is_none() {
+            match metrics
+                .as_ref()
+                .and_then(|parsed| parsed.value_for(config.metric))
+            {
+                Some(value) => format!("benchmark done ({}={value:.2})", config.metric),
+                None => "benchmark done".to_string(),
+            }
+        } else {
+            "benchmark failed".to_string()
+        };
+        trial_stage_end(
+            &mut stage,
+            index,
+            benchmark_spinner,
+            benchmark_started,
+            &benchmark_line,
+        )?;
     }
 
     if let Some(mut active) = server.take() {
+        let stop_started = Instant::now();
+        let stop_spinner = trial_stage_begin(&mut stage, index, "server stopping")?;
         if failure.is_none() {
             match active.is_running() {
                 Ok(true) => {}
@@ -1619,6 +1822,13 @@ fn execute_trial_steps(
                 merge_trial_failure(&mut failure, problem);
             }
         }
+        trial_stage_end(
+            &mut stage,
+            index,
+            stop_spinner,
+            stop_started,
+            "server stopped",
+        )?;
     }
 
     Ok(TrialExecution {
@@ -2024,7 +2234,7 @@ fn write_text(out: &mut impl Write, text: &str) -> Result<()> {
     out.write_all(text.as_bytes()).map_err(write_error)
 }
 
-fn writeln_checked(out: &mut impl Write, text: &str) -> Result<()> {
+fn writeln_checked(out: &mut (impl Write + ?Sized), text: &str) -> Result<()> {
     writeln!(out, "{text}").map_err(write_error)
 }
 

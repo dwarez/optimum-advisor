@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- live progress on stderr for `bench` and sequential `sweep` runs: preflight
+  stage lines (image resolution, hardware inspection, parameter validation,
+  model-memory estimate), per-trial stage lines with elapsed time (server
+  startup, correctness, benchmark with the selected metric value, server
+  stop), and an animated spinner with elapsed time when stderr is an
+  interactive terminal
+
 ## [0.1.6](https://github.com/dwarez/optimum-advisor/compare/v0.1.5...v0.1.6) - 2026-07-21
 
 ### Added
