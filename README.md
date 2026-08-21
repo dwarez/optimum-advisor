@@ -280,6 +280,7 @@ optimum-advisor bench --config bench.toml \
 | `--results-bucket` | Copy results to `hf://buckets/<namespace>/<name>[/<path>]` |
 | `--hf-detach` | Submit in the background, print only the job ID |
 | `--hf-binary-url` | Override the in-job binary download URL |
+| `--hf-git-ref` | Build the in-job binary from this git branch/tag instead of downloading a release |
 
 Behavior and constraints:
 
@@ -300,6 +301,11 @@ Behavior and constraints:
   version** (printed at submit time as `in-job binary: …`), so submitter and
   job always agree on flags and config schema. After upgrading, make sure your
   installed CLI matches the newest release before resubmitting.
+- **Testing unreleased changes.** `--hf-git-ref <branch-or-tag>` skips the
+  binary download and instead compiles the given ref of this repository inside
+  the job (rustup + `cargo build --release`, adding a few minutes of setup).
+  The ref must be pushed to GitHub; `--hf-git-ref` and `--hf-binary-url` are
+  mutually exclusive.
 
 ## Results
 

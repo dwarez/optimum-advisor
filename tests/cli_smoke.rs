@@ -233,6 +233,35 @@ fn hf_jobs_sweep_forwards_effective_parallelism_override() {
 }
 
 #[test]
+fn hf_jobs_git_ref_builds_the_binary_in_job() {
+    let directory = TempDir::new().unwrap();
+    let config = write_config(&directory, HF_JOBS_CONFIG);
+    let output = run(&[
+        "bench",
+        "--config",
+        config.to_str().unwrap(),
+        "--on",
+        "hf-jobs",
+        "--hf-flavor",
+        "a10g-large",
+        "--hf-git-ref",
+        "feature/progress-lines",
+        "--dry-run",
+    ]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("archive/feature/progress-lines.tar.gz"),
+        "{text}"
+    );
+    assert!(text.contains("rustup-init"), "{text}");
+    assert!(text.contains("cargo build --release --locked"), "{text}");
+    assert!(!text.contains("releases/download"), "{text}");
+    assert!(text.contains("bench --in-container"), "{text}");
+}
+
+#[test]
 fn hf_jobs_requires_flavor_config_and_forbids_overrides() {
     let directory = TempDir::new().unwrap();
     let config = write_config(&directory, HF_JOBS_CONFIG);

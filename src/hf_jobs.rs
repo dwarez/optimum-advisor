@@ -27,6 +27,13 @@ use crate::{
 
 const BINARY_PATH: &str = "/tmp/optimum-advisor";
 const CONFIG_PATH: &str = "/tmp/optimum-advisor-config.toml";
+/// Source tree checkout used when the binary is built in-job from a git ref.
+const SOURCE_DIR: &str = "/tmp/optimum-advisor-src";
+const REPO_URL: &str = "https://github.com/dwarez/optimum-advisor";
+/// Self-contained rustup installer binary; downloading it with python3 avoids
+/// any dependency on curl or wget in the engine image.
+const RUSTUP_INIT_URL: &str =
+    "https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init";
 const CORRECTNESS_VENV: &str = "/tmp/optimum-advisor-correctness";
 /// One-entry directory prepended to PATH so `lighteval` resolves from the
 /// isolated venv while `python3` keeps resolving to the base image's
@@ -72,7 +79,16 @@ pub(crate) fn submit(
         RunKind::Bench => "bench",
         RunKind::Sweep => "sweep",
     };
-    validate_binary_url(&settings.binary_url)?;
+    let binary_source = match &settings.git_ref {
+        Some(git_ref) => {
+            validate_shell_safe(git_ref, "--hf-git-ref")?;
+            BinarySource::GitRef(git_ref.as_str())
+        }
+        None => {
+            validate_binary_url(&settings.binary_url)?;
+            BinarySource::Release(settings.binary_url.as_str())
+        }
+    };
     // Forward the effective image to the in-job bench so the report's image
     // identity always matches the container the job actually runs on (the
     // shipped config file may carry a different or absent `image`). `sweep`
@@ -94,7 +110,7 @@ pub(crate) fn submit(
         .flatten();
     let persist_to_bucket = settings.results_bucket.is_some();
     let bootstrap = build_bootstrap(
-        &settings.binary_url,
+        binary_source,
         &config_b64,
         subcommand,
         forwarded_image,
@@ -146,7 +162,17 @@ pub(crate) fn submit(
     )?;
     // Surface the pinned binary so a stale local checkout (whose version pins
     // an older release) is visible at submit time instead of failing in-job.
-    writeln_checked(progress, &format!("in-job binary: {}", settings.binary_url))?;
+    match binary_source {
+        BinarySource::Release(url) => {
+            writeln_checked(progress, &format!("in-job binary: {url}"))?;
+        }
+        BinarySource::GitRef(git_ref) => {
+            writeln_checked(
+                progress,
+                &format!("in-job binary: built in-job from git ref {git_ref}"),
+            )?;
+        }
+    }
     run_hf(&args)?;
     if let Some(bucket) = &settings.results_bucket {
         writeln_checked(out, &format!("results: {bucket}"))?;
@@ -159,8 +185,25 @@ pub(crate) fn submit(
     Ok(())
 }
 
+/// Where the in-job binary comes from: a prebuilt artifact downloaded from a
+/// URL, or a git ref of this repository compiled inside the job (for testing
+/// unreleased changes without cutting a release).
+#[derive(Clone, Copy)]
+enum BinarySource<'a> {
+    Release(&'a str),
+    GitRef(&'a str),
+}
+
+/// python3 is the one guaranteed tool in the engine images (the parameter
+/// probes already depend on it), so it also performs downloads.
+fn download_line(url: &str, destination: &str) -> String {
+    format!(
+        "python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' '{url}' {destination}\n"
+    )
+}
+
 fn build_bootstrap(
-    binary_url: &str,
+    binary_source: BinarySource,
     config_b64: &str,
     subcommand: &str,
     forwarded_image: Option<&str>,
@@ -170,12 +213,38 @@ fn build_bootstrap(
 ) -> String {
     let mut script = String::new();
     script.push_str("set -eu\n");
-    // python3 is the one guaranteed tool in the engine images (the parameter
-    // probes already depend on it), so it also performs the download.
-    script.push_str(&format!(
-        "python3 -c 'import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' '{binary_url}' {BINARY_PATH}\n"
-    ));
-    script.push_str(&format!("chmod +x {BINARY_PATH}\n"));
+    match binary_source {
+        BinarySource::Release(binary_url) => {
+            script.push_str(&download_line(binary_url, BINARY_PATH));
+            script.push_str(&format!("chmod +x {BINARY_PATH}\n"));
+        }
+        BinarySource::GitRef(git_ref) => {
+            script.push_str(&download_line(
+                &format!("{REPO_URL}/archive/{git_ref}.tar.gz"),
+                "/tmp/optimum-advisor-src.tar.gz",
+            ));
+            script.push_str(&format!("mkdir -p {SOURCE_DIR}\n"));
+            script.push_str(&format!(
+                "tar xzf /tmp/optimum-advisor-src.tar.gz -C {SOURCE_DIR} --strip-components=1\n"
+            ));
+            // `ring` needs a C compiler; engine images usually ship one, but
+            // fall back to apt when they do not.
+            script.push_str(
+                "if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1; then\n  apt-get update && apt-get install -y --no-install-recommends build-essential\nfi\n",
+            );
+            script.push_str(&download_line(RUSTUP_INIT_URL, "/tmp/rustup-init"));
+            script.push_str("chmod +x /tmp/rustup-init\n");
+            script.push_str("/tmp/rustup-init -y --profile minimal --default-toolchain stable\n");
+            script.push_str("export PATH=\"$HOME/.cargo/bin:$PATH\"\n");
+            script.push_str(&format!(
+                "cargo build --release --locked --manifest-path {SOURCE_DIR}/Cargo.toml\n"
+            ));
+            script.push_str(&format!(
+                "cp {SOURCE_DIR}/target/release/optimum-advisor {BINARY_PATH}\n"
+            ));
+            script.push_str(&format!("chmod +x {BINARY_PATH}\n"));
+        }
+    }
     script.push_str(&format!(
         "printf %s '{config_b64}' | base64 -d > {CONFIG_PATH}\n"
     ));
@@ -349,7 +418,7 @@ mod tests {
     #[test]
     fn bootstrap_stages_locally_and_copies_to_bucket_even_on_failure() {
         let bucket = build_bootstrap(
-            "https://x/oa",
+            BinarySource::Release("https://x/oa"),
             "Zm9v",
             "bench",
             Some("repo/custom:1"),
@@ -358,6 +427,8 @@ mod tests {
             true,
         );
         assert!(bucket.contains("urllib.request.urlretrieve"));
+        assert!(bucket.contains("'https://x/oa' /tmp/optimum-advisor\n"));
+        assert!(!bucket.contains("cargo build"));
         assert!(bucket.contains("uv venv /tmp/optimum-advisor-correctness"));
         assert!(bucket.contains("lighteval==0.13.0"));
         // Only `lighteval` is exposed; `python3` must keep resolving to the
@@ -377,7 +448,15 @@ mod tests {
         assert!(bucket.contains("exit \"$rc\""));
         assert!(!bucket.contains("find "));
 
-        let logs = build_bootstrap("https://x/oa", "Zm9v", "sweep", None, Some(2), false, false);
+        let logs = build_bootstrap(
+            BinarySource::Release("https://x/oa"),
+            "Zm9v",
+            "sweep",
+            None,
+            Some(2),
+            false,
+            false,
+        );
         assert!(!logs.contains("uv venv"));
         assert!(!logs.contains("lighteval"));
         assert!(!logs.contains("--image"));
@@ -386,6 +465,44 @@ mod tests {
         assert!(logs.contains("find /tmp/optimum-advisor-results -name report.json -exec cat"));
         assert!(!logs.contains("cp -r"));
         assert!(logs.contains("exit \"$rc\""));
+    }
+
+    #[test]
+    fn bootstrap_builds_the_binary_from_a_git_ref() {
+        let script = build_bootstrap(
+            BinarySource::GitRef("feature/progress-lines"),
+            "Zm9v",
+            "bench",
+            Some("repo/custom:1"),
+            None,
+            false,
+            false,
+        );
+        // Source comes from the repo archive of the exact ref, never from a
+        // release binary URL.
+        assert!(script.contains(
+            "'https://github.com/dwarez/optimum-advisor/archive/feature/progress-lines.tar.gz'"
+        ));
+        assert!(!script.contains("releases/download"));
+        // The toolchain install must not depend on curl or wget: the static
+        // rustup-init binary is fetched with the same python3 download.
+        assert!(script.contains(
+            "'https://static.rust-lang.org/rustup/dist/x86_64-unknown-linux-gnu/rustup-init'"
+        ));
+        assert!(script.contains("/tmp/rustup-init -y --profile minimal"));
+        assert!(script.contains("export PATH=\"$HOME/.cargo/bin:$PATH\""));
+        // A C compiler is guaranteed before `ring` compiles.
+        assert!(script.contains("command -v cc"));
+        assert!(script.contains("apt-get install -y --no-install-recommends build-essential"));
+        assert!(script.contains(
+            "cargo build --release --locked --manifest-path /tmp/optimum-advisor-src/Cargo.toml"
+        ));
+        assert!(script.contains(
+            "cp /tmp/optimum-advisor-src/target/release/optimum-advisor /tmp/optimum-advisor"
+        ));
+        // The rest of the lifecycle is unchanged.
+        assert!(script.contains("bench --in-container"));
+        assert!(script.contains("exit \"$rc\""));
     }
 
     #[test]
