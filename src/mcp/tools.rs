@@ -541,8 +541,10 @@ fn check_correctness_tool(
     args.config.model_memory.enabled = Some(false);
     args.config.sweep = None;
     let invocation = execution_invocation(args, RunKind::Bench);
+    let mut progress = Vec::new();
     serialized(run_correctness_check_with_cancellation(
         invocation,
+        &mut progress,
         cancellation,
     )?)
 }

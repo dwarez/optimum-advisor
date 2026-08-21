@@ -802,6 +802,18 @@ enabled = false
         assert!(stdout(&output).contains("winning_config:"));
         assert!(stderr(&output).contains("trial: 1/1"));
         assert!(!stdout(&output).contains("trial:"));
+        let progress = stderr(&output);
+        assert!(progress.contains("preflight: resolving image repo/image:tag"));
+        assert!(progress.contains("preflight: image docker.io/repo/image@sha256:"));
+        assert!(progress.contains("preflight: hardware 1x "));
+        assert!(progress.contains("preflight: serving parameters valid in "));
+        assert!(!progress.contains("preflight: estimating model memory"));
+        assert!(progress.contains("trial 1/1: server starting (port "));
+        assert!(progress.contains("trial 1/1: server ready in "));
+        assert!(progress.contains("trial 1/1: benchmark running"));
+        assert!(progress.contains("trial 1/1: benchmark done (tps=42.50) in "));
+        assert!(progress.contains("trial 1/1: server stopped in "));
+        assert!(!stdout(&output).contains("preflight:"));
         let path = report_path(&runtime.results);
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains(TOKEN));
