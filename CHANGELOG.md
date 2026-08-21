@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7](https://github.com/dwarez/optimum-advisor/compare/v0.1.6...v0.1.7) - 2026-08-21
+
+### Added
+
+- hf jobs git ref ([#37](https://github.com/dwarez/optimum-advisor/pull/37))
+- improving logs, progress ([#36](https://github.com/dwarez/optimum-advisor/pull/36))
+- setup for supporting parallel benchmark execution ([#33](https://github.com/dwarez/optimum-advisor/pull/33))
+
+### Fixed
+
+- pin xxhash version otherwise lighteval breaks ([#38](https://github.com/dwarez/optimum-advisor/pull/38))
+
 ### Added
 
 - `--hf-git-ref <branch-or-tag>` for `--on hf-jobs`: build the in-job binary
