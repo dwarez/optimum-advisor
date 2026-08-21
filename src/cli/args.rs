@@ -68,6 +68,7 @@ pub(crate) struct HfJobsSettings {
     pub results_bucket: Option<String>,
     pub detach: bool,
     pub binary_url: String,
+    pub git_ref: Option<String>,
 }
 
 impl Default for HfJobsSettings {
@@ -79,6 +80,7 @@ impl Default for HfJobsSettings {
             results_bucket: None,
             detach: false,
             binary_url: DEFAULT_HF_BINARY_URL.to_string(),
+            git_ref: None,
         }
     }
 }
@@ -207,6 +209,11 @@ struct HfJobsArgs {
     /// URL of the prebuilt Linux binary downloaded inside the job.
     #[arg(long, default_value = DEFAULT_HF_BINARY_URL)]
     hf_binary_url: String,
+    /// Build the in-job binary from this git branch or tag of the
+    /// optimum-advisor repository instead of downloading a prebuilt binary.
+    /// For testing unreleased changes; the ref must be pushed to GitHub.
+    #[arg(long)]
+    hf_git_ref: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Args)]
@@ -468,6 +475,7 @@ fn resolve_hf_jobs(
         results_bucket: hf.results_bucket,
         detach: hf.hf_detach,
         binary_url: hf.hf_binary_url,
+        git_ref: hf.hf_git_ref,
     };
     match target {
         ExecutionTarget::Local => {
@@ -476,6 +484,7 @@ fn resolve_hf_jobs(
                 || settings.namespace.is_some()
                 || settings.results_bucket.is_some()
                 || settings.detach
+                || settings.git_ref.is_some()
             {
                 return Err(Error::usage("--hf-* options require --on hf-jobs"));
             }
@@ -486,6 +495,11 @@ fn resolve_hf_jobs(
             }
             if config.is_none() {
                 return Err(Error::usage("--on hf-jobs requires --config"));
+            }
+            if settings.git_ref.is_some() && settings.binary_url != DEFAULT_HF_BINARY_URL {
+                return Err(Error::usage(
+                    "--hf-git-ref and --hf-binary-url are mutually exclusive",
+                ));
             }
             if has_overrides {
                 return Err(Error::usage(
@@ -673,6 +687,87 @@ mod tests {
         };
 
         assert_eq!(invocation.input.sweep.unwrap().max_parallel_trials, Some(2));
+    }
+
+    #[test]
+    fn hf_git_ref_selects_the_in_job_source_build() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("bench.toml");
+        fs::write(&config, "schema_version=2\nengine='vllm'\nmodel='m'\n").unwrap();
+
+        let parsed = parse(
+            [
+                "bench".to_string(),
+                "--config".to_string(),
+                config.display().to_string(),
+                "--on".to_string(),
+                "hf-jobs".to_string(),
+                "--hf-flavor".to_string(),
+                "a10g-large".to_string(),
+                "--hf-git-ref".to_string(),
+                "feature/progress".to_string(),
+                "--dry-run".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        let ParsedCli::Invocation(invocation) = parsed else {
+            panic!("expected invocation");
+        };
+
+        assert_eq!(
+            invocation.hf_jobs.git_ref.as_deref(),
+            Some("feature/progress")
+        );
+    }
+
+    #[test]
+    fn hf_git_ref_conflicts_with_an_explicit_binary_url() {
+        let directory = tempdir().unwrap();
+        let config = directory.path().join("bench.toml");
+        fs::write(&config, "schema_version=2\nengine='vllm'\nmodel='m'\n").unwrap();
+
+        let error = parse(
+            [
+                "bench".to_string(),
+                "--config".to_string(),
+                config.display().to_string(),
+                "--on".to_string(),
+                "hf-jobs".to_string(),
+                "--hf-flavor".to_string(),
+                "a10g-large".to_string(),
+                "--hf-git-ref".to_string(),
+                "dev-x".to_string(),
+                "--hf-binary-url".to_string(),
+                "https://example.com/oa".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn hf_git_ref_requires_the_hf_jobs_target() {
+        let error = parse(
+            [
+                "bench".to_string(),
+                "--engine".to_string(),
+                "vllm".to_string(),
+                "--model".to_string(),
+                "m".to_string(),
+                "--hf-git-ref".to_string(),
+                "dev-x".to_string(),
+                "--dry-run".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--hf-* options require --on hf-jobs"));
     }
 
     #[test]

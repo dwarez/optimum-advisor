@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `--hf-git-ref <branch-or-tag>` for `--on hf-jobs`: build the in-job binary
+  from a pushed git ref of this repository instead of downloading a release
+  binary, so unreleased changes can be tested on Hugging Face Jobs
 - live progress on stderr for `bench` and sequential `sweep` runs: preflight
   stage lines (image resolution, hardware inspection, parameter validation,
   model-memory estimate), per-trial stage lines with elapsed time (server
